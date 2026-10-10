@@ -10,13 +10,14 @@ Flow:
   6. Stop after max_tool_rounds to prevent infinite loops.
 """
 
-from typing import Any
+from typing import Any, Optional
 
 from app.ai.embedding_factory import get_embedding_provider
+from app.ai.embeddings import EmbeddingProvider
 from app.ai.factory import get_provider
 from app.ai.provider import AIProvider
 from app.agent.tools import ToolRegistry
-from app.rag.store import InMemoryVectorStore
+from app.rag.store import InMemoryVectorStore, VectorStore
 from app.schemas.agent import AgentRunRequest, AgentRunResponse, ToolCallRecord
 
 SYSTEM_PROMPT = """You are a helpful assistant with access to tools.
@@ -38,6 +39,10 @@ class AgentService:
     def __init__(self, provider: AIProvider, registry: ToolRegistry):
         self._provider = provider
         self._registry = registry
+        # Optional dependencies exposed for ingestion/retrieval workflows.
+        # These are the same instances used by the registered search_company_knowledge tool.
+        self.embedder: Optional[EmbeddingProvider] = None
+        self.store: Optional[VectorStore] = None
 
     def run(self, request: AgentRunRequest) -> AgentRunResponse:
         messages: list[dict[str, Any]] = [
@@ -286,4 +291,7 @@ def create_agent_service() -> AgentService:
         )
     )
 
-    return AgentService(provider=provider, registry=registry)
+    service = AgentService(provider=provider, registry=registry)
+    service.embedder = embedder
+    service.store = store
+    return service
