@@ -179,14 +179,32 @@ class AgentService:
         )
 
 
-def create_agent_service() -> AgentService:
-    """Build an AgentService with the configured provider and default tools."""
-    provider = get_provider()
+def create_agent_service(
+    provider: AIProvider = None,
+    embedder: EmbeddingProvider = None,
+    store: VectorStore = None,
+) -> AgentService:
+    """Build an AgentService with the configured provider and default tools.
+
+    Args:
+        provider: AI provider for chat completions. If None, uses get_provider().
+        embedder: Embedding provider for RAG. If None, uses get_embedding_provider().
+        store: Vector store for RAG. If None, creates InMemoryVectorStore().
+               Pass a PersistentVectorStore for persistent knowledge.
+
+    Returns:
+        Configured AgentService with count_requirements, calculate_total,
+        and search_company_knowledge tools registered.
+    """
+    if provider is None:
+        provider = get_provider()
     registry = ToolRegistry()
 
     # Create shared embedding provider and vector store for RAG
-    embedder = get_embedding_provider()
-    store = InMemoryVectorStore()
+    if embedder is None:
+        embedder = get_embedding_provider()
+    if store is None:
+        store = InMemoryVectorStore()
 
     from app.agent.builtin_tools import (
         calculate_total,

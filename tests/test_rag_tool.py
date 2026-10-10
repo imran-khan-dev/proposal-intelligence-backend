@@ -563,3 +563,331 @@ class TestAgentServiceDependencyExposure:
         # Should be same type and configuration
         assert type(service.embedder) == type(service.embedder)  # Trivial but verifies attribute exists
         assert service.embedder.dimension == service.embedder.dimension
+
+
+class DeterministicMockEmbedder(EmbeddingProvider):
+    """Deterministic mock embedder that returns consistent embeddings for specific texts."""
+
+    def __init__(self, dimension: int = 4):
+        self._dimension = dimension
+        self._text_to_embedding = {
+            "company expense policy": [1.0, 0.0, 0.0, 0.0],
+            "all expenses over 100 require manager approval": [0.9, 0.1, 0.0, 0.0],
+            "travel expenses must be pre-approved": [0.8, 0.2, 0.0, 0.0],
+            "quarterly budget review process": [0.0, 1.0, 0.0, 0.0],
+            "budget requests submitted by month end": [0.1, 0.9, 0.0, 0.0],
+            "project budget approval workflow": [0.2, 0.8, 0.0, 0.0],
+        }
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        results = []
+        for text in texts:
+            # Find matching key (case-insensitive, partial)
+            text_lower = text.lower()
+            matched = False
+            for key, emb in self._text_to_embedding.items():
+                if key in text_lower or text_lower in key:
+                    results.append(emb)
+                    matched = True
+                    break
+            if not matched:
+                # Default embedding
+                results.append([0.1] * self._dimension)
+        return results
+
+
+class TestPersistentRagIntegration:
+    """End-to-end integration tests for persistent RAG workflow."""
+
+    def _make_persistent_service(self, path: str, embedder=None):
+        """Create an agent service with PersistentVectorStore."""
+        from app.rag.store import PersistentVectorStore
+
+        if embedder is None:
+            embedder = DeterministicMockEmbedder(dimension=4)
+
+        store = PersistentVectorStore(path)
+        provider = _make_mock_provider()
+        service = create_agent_service(provider=provider, embedder=embedder, store=store)
+        return service
+
+    def test_ingest_and_retrieve_with_persistent_store(self):
+        """Ingest document via exposed store, retrieve via search tool."""
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            # Create service with persistent store
+            embedder = DeterministicMockEmbedder(dimension=4)
+            service = self._make_persistent_service(path, embedder=embedder)
+
+            # Ingest a company document
+            from app.rag.ingest import ingest_document
+
+            text = """Company Expense Policy
+
+            All expenses over $100 require manager approval.
+            Travel expenses must be pre-approved by department head.
+            Receipts required for all expenses over $25."""
+
+            doc_id = "expense-policy-2024"
+            count = ingest_document(
+                text=text,
+                doc_id=doc_id,
+                store=service.store,
+                embedder=service.embedder,
+                chunk_size=100,
+                overlap=20,
+            )
+
+            assert count > 0
+            assert service.store.count() == count
+
+            # Search via the tool - should find relevant chunks
+            tool = service._registry.get("search_company_knowledge")
+            search_handler = tool.handler
+
+            results = search_handler(query="expense policy approval", top_k=5)
+
+            assert len(results) >= 1
+            # Verify content relevance
+            found = any("expense" in r["text"].lower() and "approval" in r["text"].lower() for r in results)
+            assert found
+
+            # Verify metadata preserved
+            for r in results:
+                assert r["metadata"]["doc_id"] == doc_id
+                assert "chunk_index" in r["metadata"]
+
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_persistence_across_service_recreation(self):
+        """Document persists and is searchable after recreating store and service."""
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            embedder = DeterministicMockEmbedder(dimension=4)
+
+            # First service: ingest document
+            service1 = self._make_persistent_service(path, embedder=embedder)
+
+            from app.rag.ingest import ingest_document
+
+            text = "Quarterly budget review process: budget requests submitted by month end."
+            doc_id = "budget-process-2024"
+            count = ingest_document(
+                text=text,
+                doc_id=doc_id,
+                store=service1.store,
+                embedder=service1.embedder,
+                chunk_size=100,
+                overlap=20,
+            )
+            assert count > 0
+            original_count = service1.store.count()
+
+            # Recreate store and service with same file
+            service2 = self._make_persistent_service(path, embedder=embedder)
+
+            # Verify document count preserved
+            assert service2.store.count() == original_count
+
+            # Search via new service's tool
+            tool = service2._registry.get("search_company_knowledge")
+            search_handler = tool.handler
+
+            results = search_handler(query="budget review month end", top_k=5)
+
+            assert len(results) >= 1
+            found = any("budget" in r["text"].lower() and "month" in r["text"].lower() for r in results)
+            assert found
+
+            # Verify metadata preserved across recreation
+            for r in results:
+                assert r["metadata"]["doc_id"] == doc_id
+                assert "chunk_index" in r["metadata"]
+
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_multiple_documents_persisted_and_searchable(self):
+        """Multiple documents ingested, all retrievable after recreation."""
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            embedder = DeterministicMockEmbedder(dimension=4)
+            service = self._make_persistent_service(path, embedder=embedder)
+
+            from app.rag.ingest import ingest_document
+
+            # Ingest two different documents
+            ingest_document(
+                text="Company expense policy: all expenses over 100 require manager approval.",
+                doc_id="expense-policy",
+                store=service.store,
+                embedder=service.embedder,
+            )
+            ingest_document(
+                text="Quarterly budget review process: budget requests submitted by month end.",
+                doc_id="budget-process",
+                store=service.store,
+                embedder=service.embedder,
+            )
+
+            # Recreate
+            service2 = self._make_persistent_service(path, embedder=embedder)
+            tool = service2._registry.get("search_company_knowledge")
+            search_handler = tool.handler
+
+            # Search for expense-related content
+            expense_results = search_handler(query="expense approval", top_k=5)
+            assert len(expense_results) >= 1
+            assert any(r["metadata"]["doc_id"] == "expense-policy" for r in expense_results)
+
+            # Search for budget-related content
+            budget_results = search_handler(query="budget review", top_k=5)
+            assert len(budget_results) >= 1
+            assert any(r["metadata"]["doc_id"] == "budget-process" for r in budget_results)
+
+            # Both documents should be in store
+            assert service2.store.count() >= 2
+
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_empty_store_returns_no_results(self):
+        """Fresh/empty persistent store returns no results without crashing."""
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            embedder = DeterministicMockEmbedder(dimension=4)
+            service = self._make_persistent_service(path, embedder=embedder)
+
+            # Store is empty - no documents ingested
+            tool = service._registry.get("search_company_knowledge")
+            search_handler = tool.handler
+
+            results = search_handler(query="any query", top_k=5)
+
+            assert results == []
+
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_absent_file_creates_empty_store(self):
+        """Non-existent file path creates empty store without error."""
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "nonexistent.jsonl")
+
+            embedder = DeterministicMockEmbedder(dimension=4)
+            service = self._make_persistent_service(path, embedder=embedder)
+
+            # Should be empty
+            assert service.store.count() == 0
+            assert service.store.dimension is None
+
+            tool = service._registry.get("search_company_knowledge")
+            search_handler = tool.handler
+
+            results = search_handler(query="any query", top_k=5)
+            assert results == []
+
+    def test_empty_file_creates_empty_store(self):
+        """Empty file creates empty store without error."""
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            embedder = DeterministicMockEmbedder(dimension=4)
+            service = self._make_persistent_service(path, embedder=embedder)
+
+            assert service.store.count() == 0
+            assert service.store.dimension is None
+
+            tool = service._registry.get("search_company_knowledge")
+            search_handler = tool.handler
+
+            results = search_handler(query="any query", top_k=5)
+            assert results == []
+
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_reingestion_replaces_document_in_persistent_store(self):
+        """Re-ingesting same doc_id replaces old chunks in persistent store."""
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            embedder = DeterministicMockEmbedder(dimension=4)
+
+            # First ingestion
+            service1 = self._make_persistent_service(path, embedder=embedder)
+            from app.rag.ingest import ingest_document
+
+            text1 = "Old version of the policy document."
+            ingest_document(
+                text=text1,
+                doc_id="policy-v1",
+                store=service1.store,
+                embedder=service1.embedder,
+            )
+            assert service1.store.count() == 1
+
+            # Re-ingest with new content
+            service2 = self._make_persistent_service(path, embedder=embedder)
+            text2 = "New version of the policy document with updated rules."
+            count = ingest_document(
+                text=text2,
+                doc_id="policy-v1",
+                store=service2.store,
+                embedder=service2.embedder,
+            )
+            assert count == 1
+            assert service2.store.count() == 1  # Still only 1 chunk (replaced)
+
+            # Search should find new content
+            tool = service2._registry.get("search_company_knowledge")
+            search_handler = tool.handler
+            results = search_handler(query="updated rules", top_k=5)
+
+            assert len(results) == 1
+            assert "updated rules" in results[0]["text"].lower()
+
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
