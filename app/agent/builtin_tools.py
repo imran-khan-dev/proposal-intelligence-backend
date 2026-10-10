@@ -1,5 +1,11 @@
 """Simple tools for the tool-calling demonstration."""
 
+from typing import Any
+
+from app.ai.embeddings import EmbeddingProvider
+from app.rag.retrieve import retrieve
+from app.rag.store import VectorStore
+
 
 def count_requirements(requirements: list[str]) -> int:
     """Count the number of requirements in a list.
@@ -70,3 +76,48 @@ def calculate_total(items: list[dict]) -> float:
         total += float(quantity) * float(unit_price)
 
     return round(total, 2)
+
+
+def create_search_company_knowledge_tool(
+    embedder: EmbeddingProvider,
+    store: VectorStore,
+):
+    """Create a search_company_knowledge tool handler with injected dependencies.
+
+    Args:
+        embedder: Embedding provider for query embedding.
+        store: Vector store to search (shared instance).
+
+    Returns:
+        A handler function with signature (query: str, top_k: int = 5) -> list[dict].
+    """
+
+    def search_company_knowledge(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+        """Search the company knowledge base for relevant information.
+
+        Args:
+            query: The search query text.
+            top_k: Maximum number of results to return (default: 5).
+
+        Returns:
+            A list of search results, each containing:
+            - text: The chunk text
+            - score: Similarity score (0.0 to 1.0)
+            - metadata: Document metadata including doc_id and chunk_index
+        """
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
+
+        results = retrieve(query=query, embedder=embedder, store=store, top_k=top_k)
+
+        # Convert SearchResult objects to JSON-serializable dicts
+        return [
+            {
+                "text": result.record.text,
+                "score": result.score,
+                "metadata": result.record.metadata,
+            }
+            for result in results
+        ]
+
+    return search_company_knowledge

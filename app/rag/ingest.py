@@ -106,15 +106,30 @@ def ingest_document(
             f"for {len(chunks)} chunks"
         )
 
+    # Step 3b: Validate embedding dimensions
+    if not embeddings:
+        raise ValueError("No embeddings generated")
+    new_dim = len(embeddings[0])
+    for i, emb in enumerate(embeddings[1:], 1):
+        if len(emb) != new_dim:
+            raise ValueError(
+                f"Inconsistent embedding dimensions: embedding 0 has {new_dim}, "
+                f"embedding {i} has {len(emb)}"
+            )
+    if store.dimension is not None and new_dim != store.dimension:
+        raise ValueError(
+            f"Embedding dimension mismatch: store has {store.dimension}, "
+            f"new embeddings have {new_dim}"
+        )
+
     # Step 4: Build VectorRecord objects
     records: List[VectorRecord] = []
     for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
         record_metadata = {
+            **(metadata or {}),
             "doc_id": doc_id,
             "chunk_index": i,
         }
-        if metadata:
-            record_metadata.update(metadata)
 
         records.append(
             VectorRecord(

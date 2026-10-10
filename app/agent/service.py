@@ -12,9 +12,11 @@ Flow:
 
 from typing import Any
 
+from app.ai.embedding_factory import get_embedding_provider
 from app.ai.factory import get_provider
 from app.ai.provider import AIProvider
 from app.agent.tools import ToolRegistry
+from app.rag.store import InMemoryVectorStore
 from app.schemas.agent import AgentRunRequest, AgentRunResponse, ToolCallRecord
 
 SYSTEM_PROMPT = """You are a helpful assistant with access to tools.
@@ -25,6 +27,7 @@ use the appropriate tool. Always prefer using a tool over guessing.
 Available tools:
 - count_requirements: Count items in a list of requirements.
 - calculate_total: Calculate the total cost of line items.
+- search_company_knowledge: Search the company knowledge base for relevant information.
 
 If a tool is not needed, answer directly from your knowledge."""
 
@@ -170,12 +173,21 @@ class AgentService:
             rounds_used=request.max_tool_rounds,
         )
 
+
 def create_agent_service() -> AgentService:
     """Build an AgentService with the configured provider and default tools."""
     provider = get_provider()
     registry = ToolRegistry()
 
-    from app.agent.builtin_tools import calculate_total, count_requirements
+    # Create shared embedding provider and vector store for RAG
+    embedder = get_embedding_provider()
+    store = InMemoryVectorStore()
+
+    from app.agent.builtin_tools import (
+        calculate_total,
+        count_requirements,
+        create_search_company_knowledge_tool,
+    )
     from app.agent.tools import Tool
 
     registry.register(
@@ -236,6 +248,40 @@ def create_agent_service() -> AgentService:
                     }
                 },
                 "required": ["items"],
+            },
+        )
+    )
+
+    # Register RAG search tool with injected dependencies
+    search_tool_handler = create_search_company_knowledge_tool(
+        embedder=embedder,
+        store=store,
+    )
+    registry.register(
+        Tool(
+            name="search_company_knowledge",
+            description=(
+                "Search the company knowledge base for relevant information. "
+                "Use this when the user asks questions about company documents, "
+                "policies, or previously ingested RFPs."
+            ),
+            handler=search_tool_handler,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query text.",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 5,
+                        "description": "Maximum number of results to return (default: 5).",
+                    },
+                },
+                "required": ["query"],
             },
         )
     )

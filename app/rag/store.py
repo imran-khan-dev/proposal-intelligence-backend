@@ -65,6 +65,7 @@ class VectorStore(ABC):
         Args:
             metadata_filter: Dictionary of key/value pairs. A record matches
                 if its metadata contains all specified key/value pairs.
+                An empty filter is a no-op and returns 0.
 
         Returns:
             Number of records deleted.

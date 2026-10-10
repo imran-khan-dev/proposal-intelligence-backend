@@ -280,6 +280,115 @@ class TestIngestDocument:
         # Original data preserved
         assert store.count() > 0
 
+    def test_metadata_cannot_override_doc_id(self):
+        """Caller metadata cannot override reserved doc_id field."""
+        store = InMemoryVectorStore()
+        embedder = MockEmbeddingProvider(dimension=4)
+
+        text = "Test document"
+        ingest_document(
+            text=text,
+            doc_id="doc-real",
+            store=store,
+            embedder=embedder,
+            metadata={"doc_id": "doc-fake", "source": "test.pdf"},
+        )
+
+        results = store.search([0.1] * 4, k=10)
+        assert len(results) == 1
+        assert results[0].record.metadata["doc_id"] == "doc-real"
+        assert results[0].record.metadata["source"] == "test.pdf"
+
+    def test_metadata_cannot_override_chunk_index(self):
+        """Caller metadata cannot override reserved chunk_index field."""
+        store = InMemoryVectorStore()
+        embedder = MockEmbeddingProvider(dimension=4)
+
+        text = "A" * 250  # Multiple chunks
+        ingest_document(
+            text=text,
+            doc_id="doc-1",
+            store=store,
+            embedder=embedder,
+            chunk_size=100,
+            overlap=20,
+            metadata={"chunk_index": 999},
+        )
+
+        results = store.search([0.1] * 4, k=10)
+        # chunk_index should be 0, 1, 2 (actual positions), not 999
+        indices = {r.record.metadata["chunk_index"] for r in results}
+        assert 999 not in indices
+        assert indices == {0, 1, 2}
+
+    def test_embedding_dimension_mismatch_with_store_raises(self):
+        """New embedding dimension conflicting with store raises ValueError and preserves chunks."""
+        store = InMemoryVectorStore()
+        embedder_3d = MockEmbeddingProvider(dimension=3)
+        embedder_5d = MockEmbeddingProvider(dimension=5)
+
+        # First ingestion with 3D embeddings
+        ingest_document(
+            text="Original content",
+            doc_id="doc-1",
+            store=store,
+            embedder=embedder_3d,
+        )
+        assert store.count() > 0
+        assert store.dimension == 3
+
+        # Try re-ingest with 5D embeddings
+        with pytest.raises(ValueError, match="Embedding dimension mismatch"):
+            ingest_document(
+                text="New content",
+                doc_id="doc-1",
+                store=store,
+                embedder=embedder_5d,
+            )
+
+        # Original chunks preserved
+        assert store.count() > 0
+        assert store.dimension == 3
+
+    def test_inconsistent_embedding_dimensions_raises(self):
+        """Inconsistent dimensions among new embeddings raises ValueError before deletion."""
+        store = InMemoryVectorStore()
+
+        class InconsistentEmbedder(EmbeddingProvider):
+            @property
+            def dimension(self) -> int:
+                return 4
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                # Return embeddings with inconsistent dimensions (one per text)
+                return [[0.1] * 4 if i == 0 else [0.1] * 5 for i in range(len(texts))]
+
+        embedder = InconsistentEmbedder()
+
+        # First ingestion to have something to lose
+        ingest_document(
+            text="Original content",
+            doc_id="doc-1",
+            store=store,
+            embedder=MockEmbeddingProvider(dimension=4),
+        )
+        assert store.count() > 0
+
+        # Try re-ingest with inconsistent embeddings
+        text = "A" * 150  # 2 chunks with chunk_size=100, overlap=20
+        with pytest.raises(ValueError, match="Inconsistent embedding dimensions"):
+            ingest_document(
+                text=text,
+                doc_id="doc-1",
+                store=store,
+                embedder=embedder,
+                chunk_size=100,
+                overlap=20,
+            )
+
+        # Original chunks preserved
+        assert store.count() > 0
+
 
 class TestDeleteByMetadata:
     """Tests for delete_by_metadata on InMemoryVectorStore."""
