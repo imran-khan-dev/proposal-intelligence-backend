@@ -1,0 +1,243 @@
+"""Agent service that orchestrates tool calling.
+
+Flow:
+  1. Build the initial message list (system + user).
+  2. Call provider.chat_with_tools(messages, tools).
+  3. Inspect the response for tool_calls.
+  4. If no tool_calls → return the model's final answer.
+  5. If tool_calls → validate tool name and arguments, execute,
+     append tool results to messages, and repeat from step 2.
+  6. Stop after max_tool_rounds to prevent infinite loops.
+"""
+
+from typing import Any
+
+from app.ai.factory import get_provider
+from app.ai.provider import AIProvider
+from app.agent.tools import ToolRegistry
+from app.schemas.agent import AgentRunRequest, AgentRunResponse, ToolCallRecord
+
+SYSTEM_PROMPT = """You are a helpful assistant with access to tools.
+
+When the user asks a question that requires calculation or counting,
+use the appropriate tool. Always prefer using a tool over guessing.
+
+Available tools:
+- count_requirements: Count items in a list of requirements.
+- calculate_total: Calculate the total cost of line items.
+
+If a tool is not needed, answer directly from your knowledge."""
+
+
+class AgentService:
+    """Orchestrates tool-calling with a configured AI provider."""
+
+    def __init__(self, provider: AIProvider, registry: ToolRegistry):
+        self._provider = provider
+        self._registry = registry
+
+    def run(self, request: AgentRunRequest) -> AgentRunResponse:
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": request.message},
+        ]
+        tools = self._registry.to_openai_format()
+
+        tool_call_records: list[ToolCallRecord] = []
+
+        for round_num in range(1, request.max_tool_rounds + 1):
+            completion = self._provider.chat_with_tools(
+                messages=messages,
+                tools=tools,
+            )
+
+            if completion is None:
+                raise RuntimeError("Provider returned None completion")
+
+            choices = getattr(completion, "choices", None)
+            if not choices:
+                raise RuntimeError("Provider returned completion with no choices")
+
+            choice = choices[0]
+            if choice is None:
+                raise RuntimeError("Provider returned completion with None choice")
+
+            assistant_message = getattr(choice, "message", None)
+            if assistant_message is None:
+                raise RuntimeError("Provider returned choice with no message")
+
+            # Normalize assistant message into plain dicts for provider compatibility.
+            # OpenAI-compatible APIs require tool_calls as dicts with id, type,
+            # and function{name, arguments}. Raw SDK objects may not serialize.
+            raw_tool_calls = getattr(assistant_message, "tool_calls", None)
+            if raw_tool_calls:
+                normalized_tool_calls = []
+                for tc in raw_tool_calls:
+                    normalized_tool_calls.append(
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                    )
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": assistant_message.content,
+                        "tool_calls": normalized_tool_calls,
+                    }
+                )
+            else:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": assistant_message.content,
+                    }
+                )
+
+            tool_calls = raw_tool_calls
+            if not tool_calls:
+                # Model produced a final answer with no tool calls
+                final_answer = assistant_message.content or ""
+                return AgentRunResponse(
+                    final_answer=final_answer,
+                    tool_calls=tool_call_records,
+                    rounds_used=round_num,
+                )
+
+            # Execute each requested tool call
+            for tool_call in tool_calls:
+                tool_name = tool_call.function.name
+                raw_args = tool_call.function.arguments
+
+                # Parse arguments
+                try:
+                    import json
+
+                    arguments = (
+                        json.loads(raw_args)
+                        if isinstance(raw_args, str)
+                        else raw_args
+                    )
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"Failed to parse tool arguments for '{tool_name}': {exc}"
+                    ) from exc
+
+                # Validate tool name
+                if not self._registry.get(tool_name):
+                    raise RuntimeError(
+                        f"Model requested unknown tool: '{tool_name}'. "
+                        f"Available: {self._registry.names()}"
+                    )
+
+                # Execute the tool
+                try:
+                    result = self._registry.execute(tool_name, arguments)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"Tool '{tool_name}' failed: {exc}"
+                    ) from exc
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Tool '{tool_name}' raised an unexpected error: {exc}"
+                    ) from exc
+
+                tool_call_records.append(
+                    ToolCallRecord(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        result=result,
+                    )
+                )
+
+                # Append tool result to messages
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": str(result),
+                    }
+                )
+
+        # Max rounds reached without a final answer
+        return AgentRunResponse(
+            final_answer="Maximum tool-call rounds reached without a final answer.",
+            tool_calls=tool_call_records,
+            rounds_used=request.max_tool_rounds,
+        )
+
+def create_agent_service() -> AgentService:
+    """Build an AgentService with the configured provider and default tools."""
+    provider = get_provider()
+    registry = ToolRegistry()
+
+    from app.agent.builtin_tools import calculate_total, count_requirements
+    from app.agent.tools import Tool
+
+    registry.register(
+        Tool(
+            name="count_requirements",
+            description=(
+                "Count the number of items in a list of requirements. "
+                "Use this when the user asks how many requirements there are."
+            ),
+            handler=count_requirements,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "requirements": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "A list of requirement strings.",
+                    }
+                },
+                "required": ["requirements"],
+            },
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="calculate_total",
+            description=(
+                "Calculate the total cost of a list of line items. "
+                "Each item has a description, quantity, and unit_price. "
+                "Use this when the user asks for a total cost or sum."
+            ),
+            handler=calculate_total,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "quantity": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                },
+                                "unit_price": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                },
+                            },
+                            "required": [
+                                "description",
+                                "quantity",
+                                "unit_price",
+                            ],
+                        },
+                    }
+                },
+                "required": ["items"],
+            },
+        )
+    )
+
+    return AgentService(provider=provider, registry=registry)

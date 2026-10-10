@@ -1,4 +1,4 @@
-from typing import Type, TypeVar
+from typing import Any, Type, TypeVar
 
 from openai import OpenAI
 from pydantic import BaseModel
@@ -45,3 +45,15 @@ class KiloProvider(AIProvider):
                 f"Failed to validate Kilo response as "
                 f"{response_model.__name__}: {exc}"
             ) from exc
+
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> Any:
+        return self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+        )

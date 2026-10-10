@@ -1,4 +1,4 @@
-from typing import Type, TypeVar
+from typing import Any, Type, TypeVar
 
 from openai import OpenAI
 from pydantic import BaseModel
@@ -25,28 +25,18 @@ class OllamaProvider(AIProvider):
         user_text: str,
         response_model: Type[T],
     ) -> T:
-
-        print(f"[Ollama] Model: {self._model}")
-        print(f"[Ollama] Input characters: {len(user_text)}")
-        print("[Ollama] Sending request...")
-
         completion = self._client.chat.completions.create(
             model=self._model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_text},
             ],
-            # response_format={"type": "json_object"},
         )
-
-        print("[Ollama] Response received")
 
         raw = completion.choices[0].message.content
 
         if not raw:
             raise RuntimeError("Ollama returned empty response")
-
-        print(f"[Ollama] Response characters: {len(raw)}")
 
         try:
             return response_model.model_validate_json(raw)
@@ -55,3 +45,15 @@ class OllamaProvider(AIProvider):
                 f"Failed to validate Ollama response as "
                 f"{response_model.__name__}: {exc}"
             ) from exc
+
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> Any:
+        return self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+        )

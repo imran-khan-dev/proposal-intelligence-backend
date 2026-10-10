@@ -1,4 +1,4 @@
-from typing import Type, TypeVar
+from typing import Any, Type, TypeVar
 
 from openai import OpenAI
 from pydantic import BaseModel
@@ -35,3 +35,15 @@ class OpenAIProvider(AIProvider):
             raise RuntimeError("OpenAI returned no structured output")
 
         return result
+
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> Any:
+        return self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+        )
