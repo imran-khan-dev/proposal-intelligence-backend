@@ -1,8 +1,11 @@
 """Tests for vector store."""
 
 import pytest
+import tempfile
+import os
+import json
 
-from app.rag.store import InMemoryVectorStore, VectorRecord, SearchResult
+from app.rag.store import InMemoryVectorStore, PersistentVectorStore, VectorRecord, SearchResult
 
 
 class TestInMemoryVectorStore:
@@ -201,3 +204,433 @@ class TestSearchResult:
         result = SearchResult(record=record, score=0.95)
         assert result.record == record
         assert result.score == 0.95
+
+
+class TestPersistentVectorStore:
+    """Tests for PersistentVectorStore."""
+
+    def _make_store(self, path: str = None) -> PersistentVectorStore:
+        """Create a PersistentVectorStore with a temporary file."""
+        if path is None:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl")
+            path = tmp.name
+            tmp.close()
+        return PersistentVectorStore(path)
+
+    def _cleanup(self, path: str) -> None:
+        """Clean up a temporary file."""
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    def test_absent_file_creates_empty_store(self):
+        """Non-existent file initializes an empty store."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "nonexistent.jsonl")
+            store = PersistentVectorStore(path)
+            assert store.count() == 0
+            assert store.dimension is None
+
+    def test_empty_file_creates_empty_store(self):
+        """Empty file initializes an empty store."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+        try:
+            store = PersistentVectorStore(path)
+            assert store.count() == 0
+            assert store.dimension is None
+        finally:
+            self._cleanup(path)
+
+    def test_add_and_reload_preserves_records(self):
+        """Records added are persisted and reloaded."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            # First store instance - add records
+            store1 = PersistentVectorStore(path)
+            records = [
+                VectorRecord(id="1", text="first", embedding=[1.0, 0.0], metadata={"doc": "a"}),
+                VectorRecord(id="2", text="second", embedding=[0.0, 1.0], metadata={"doc": "b"}),
+            ]
+            store1.add(records)
+            assert store1.count() == 2
+            assert store1.dimension == 2
+
+            # Second store instance - should load persisted records
+            store2 = PersistentVectorStore(path)
+            assert store2.count() == 2
+            assert store2.dimension == 2
+
+            # Verify content
+            results = store2.search([1.0, 0.0], k=2)
+            assert len(results) == 2
+            assert results[0].record.id == "1"
+            assert results[0].record.text == "first"
+            assert results[0].record.metadata == {"doc": "a"}
+            assert results[0].score == 1.0
+
+            assert results[1].record.id == "2"
+            assert results[1].record.text == "second"
+            assert results[1].record.metadata == {"doc": "b"}
+
+        finally:
+            self._cleanup(path)
+
+    def test_search_after_reload_works(self):
+        """Similarity search works correctly after reload."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store1 = PersistentVectorStore(path)
+            store1.add([
+                VectorRecord(id="1", text="a", embedding=[1.0, 0.0], metadata={}),
+                VectorRecord(id="2", text="b", embedding=[0.0, 1.0], metadata={}),
+                VectorRecord(id="3", text="c", embedding=[0.707, 0.707], metadata={}),
+            ])
+
+            # Reload and search
+            store2 = PersistentVectorStore(path)
+            results = store2.search([1.0, 0.0], k=3)
+
+            assert len(results) == 3
+            assert results[0].record.id == "1"
+            assert results[0].score == 1.0
+            assert results[1].record.id == "3"
+            assert results[2].record.id == "2"
+            assert results[2].score == 0.0
+
+        finally:
+            self._cleanup(path)
+
+    def test_multiple_records_metadata_preserved(self):
+        """Multiple records with various metadata are preserved."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store1 = PersistentVectorStore(path)
+            records = [
+                VectorRecord(id="1", text="t1", embedding=[0.1, 0.2], metadata={"page": 1, "source": "doc.pdf"}),
+                VectorRecord(id="2", text="t2", embedding=[0.3, 0.4], metadata={"page": 2, "source": "doc.pdf", "tags": ["a", "b"]}),
+                VectorRecord(id="3", text="t3", embedding=[0.5, 0.6], metadata={}),
+            ]
+            store1.add(records)
+
+            store2 = PersistentVectorStore(path)
+            assert store2.count() == 3
+
+            results = store2.search([0.1, 0.2], k=3)
+            assert len(results) == 3
+
+            # Check all metadata preserved
+            for r in results:
+                if r.record.id == "1":
+                    assert r.record.metadata == {"page": 1, "source": "doc.pdf"}
+                elif r.record.id == "2":
+                    assert r.record.metadata == {"page": 2, "source": "doc.pdf", "tags": ["a", "b"]}
+                elif r.record.id == "3":
+                    assert r.record.metadata == {}
+
+        finally:
+            self._cleanup(path)
+
+    def test_add_persists(self):
+        """Add operation persists to disk."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store = PersistentVectorStore(path)
+            store.add([VectorRecord(id="1", text="test", embedding=[1.0, 0.0], metadata={"k": "v"})])
+
+            # Verify file was written
+            assert os.path.exists(path)
+            assert os.path.getsize(path) > 0
+
+            # Reload and verify
+            store2 = PersistentVectorStore(path)
+            assert store2.count() == 1
+
+        finally:
+            self._cleanup(path)
+
+    def test_delete_by_metadata_persists(self):
+        """Delete by metadata persists to disk."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store1 = PersistentVectorStore(path)
+            store1.add([
+                VectorRecord(id="1", text="a", embedding=[1.0, 0.0], metadata={"doc_id": "doc-1"}),
+                VectorRecord(id="2", text="b", embedding=[0.0, 1.0], metadata={"doc_id": "doc-2"}),
+            ])
+            assert store1.count() == 2
+
+            deleted = store1.delete_by_metadata({"doc_id": "doc-1"})
+            assert deleted == 1
+            assert store1.count() == 1
+
+            # Reload and verify
+            store2 = PersistentVectorStore(path)
+            assert store2.count() == 1
+            results = store2.search([1.0, 0.0], k=5)
+            assert len(results) == 1
+            assert results[0].record.metadata["doc_id"] == "doc-2"
+
+        finally:
+            self._cleanup(path)
+
+    def test_clear_persists(self):
+        """Clear operation persists to disk."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store1 = PersistentVectorStore(path)
+            store1.add([VectorRecord(id="1", text="a", embedding=[1.0, 0.0], metadata={})])
+            assert store1.count() == 1
+
+            store1.clear()
+            assert store1.count() == 0
+            assert store1.dimension is None
+
+            # Reload and verify
+            store2 = PersistentVectorStore(path)
+            assert store2.count() == 0
+            assert store2.dimension is None
+
+        finally:
+            self._cleanup(path)
+
+    def test_dimension_validation_on_add(self):
+        """Adding records with wrong dimension raises and doesn't persist."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store = PersistentVectorStore(path)
+            store.add([VectorRecord(id="1", text="a", embedding=[1.0, 0.0], metadata={})])
+            assert store.dimension == 2
+
+            # Try to add 3D record - should raise
+            with pytest.raises(ValueError, match="dimension mismatch"):
+                store.add([VectorRecord(id="2", text="b", embedding=[1.0, 0.0, 0.0], metadata={})])
+
+            # Original record should still be there
+            assert store.count() == 1
+            assert store.dimension == 2
+
+            # Reload and verify original persisted
+            store2 = PersistentVectorStore(path)
+            assert store2.count() == 1
+            assert store2.dimension == 2
+
+        finally:
+            self._cleanup(path)
+
+    def test_dimension_validation_on_load(self):
+        """Loading records with inconsistent dimensions raises."""
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+            # Write two records with different dimensions
+            tmp.write('{"id": "1", "text": "a", "embedding": [1.0, 0.0], "metadata": {}}\n')
+            tmp.write('{"id": "2", "text": "b", "embedding": [1.0, 0.0, 0.0], "metadata": {}}\n')
+
+        try:
+            with pytest.raises(ValueError, match="Dimension mismatch"):
+                PersistentVectorStore(path)
+        finally:
+            self._cleanup(path)
+
+    def test_malformed_json_raises(self):
+        """Malformed JSON in file raises clear error."""
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+            tmp.write('{"id": "1", "text": "a", "embedding": [1.0, 0.0], "metadata": {}}\n')
+            tmp.write('not valid json\n')
+
+        try:
+            with pytest.raises(ValueError, match="Malformed JSON at line 2"):
+                PersistentVectorStore(path)
+        finally:
+            self._cleanup(path)
+
+    def test_missing_field_raises(self):
+        """Missing required field raises clear error."""
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+            tmp.write('{"id": "1", "text": "a", "embedding": [1.0, 0.0]}\n')  # missing metadata
+
+        try:
+            with pytest.raises(ValueError, match="Missing required field 'metadata'"):
+                PersistentVectorStore(path)
+        finally:
+            self._cleanup(path)
+
+    def test_empty_embedding_raises(self):
+        """Record with empty embedding raises on load."""
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+            tmp.write('{"id": "1", "text": "a", "embedding": [], "metadata": {}}\n')
+
+        try:
+            with pytest.raises(ValueError, match="empty or invalid embedding"):
+                PersistentVectorStore(path)
+        finally:
+            self._cleanup(path)
+
+    def test_non_numeric_embedding_raises(self):
+        """Record with non-numeric embedding values raises on load."""
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+            tmp.write('{"id": "1", "text": "a", "embedding": [1.0, "x"], "metadata": {}}\n')
+
+        try:
+            with pytest.raises(ValueError, match="non-numeric embedding values"):
+                PersistentVectorStore(path)
+        finally:
+            self._cleanup(path)
+
+    def test_invalid_metadata_type_raises(self):
+        """Record with non-object metadata raises on load."""
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+            tmp.write('{"id": "1", "text": "a", "embedding": [1.0, 0.0], "metadata": "not an object"}\n')
+
+        try:
+            with pytest.raises(ValueError, match="invalid metadata"):
+                PersistentVectorStore(path)
+        finally:
+            self._cleanup(path)
+
+    def test_non_serializable_metadata_raises_on_add(self):
+        """Adding record with non-JSON-serializable metadata raises."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store = PersistentVectorStore(path)
+            # set is not JSON serializable
+            record = VectorRecord(id="1", text="a", embedding=[1.0, 0.0], metadata={"tags": set([1, 2])})
+
+            with pytest.raises(ValueError, match="not JSON serializable"):
+                store.add([record])
+
+            # Store should be empty
+            assert store.count() == 0
+
+        finally:
+            self._cleanup(path)
+
+    def test_failed_save_rolls_back_add(self):
+        """Failed save during add rolls back in-memory state."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store = PersistentVectorStore(path)
+            store.add([VectorRecord(id="1", text="a", embedding=[1.0, 0.0], metadata={})])
+            assert store.count() == 1
+
+            # Make the file read-only to force save failure
+            os.chmod(path, 0o444)
+
+            try:
+                with pytest.raises(Exception):
+                    store.add([VectorRecord(id="2", text="b", embedding=[0.0, 1.0], metadata={})])
+            finally:
+                # Restore permissions for cleanup
+                os.chmod(path, 0o644)
+
+            # Original record should still be there (rollback worked)
+            assert store.count() == 1
+            results = store.search([1.0, 0.0], k=5)
+            assert len(results) == 1
+            assert results[0].record.id == "1"
+
+        finally:
+            self._cleanup(path)
+
+    def test_failed_save_rolls_back_delete(self):
+        """Failed save during delete rolls back in-memory state."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store = PersistentVectorStore(path)
+            store.add([
+                VectorRecord(id="1", text="a", embedding=[1.0, 0.0], metadata={"doc_id": "doc-1"}),
+                VectorRecord(id="2", text="b", embedding=[0.0, 1.0], metadata={"doc_id": "doc-2"}),
+            ])
+            assert store.count() == 2
+
+            # Make the file read-only to force save failure
+            os.chmod(path, 0o444)
+
+            try:
+                with pytest.raises(Exception):
+                    store.delete_by_metadata({"doc_id": "doc-1"})
+            finally:
+                os.chmod(path, 0o644)
+
+            # Both records should still be there (rollback worked)
+            assert store.count() == 2
+
+        finally:
+            self._cleanup(path)
+
+    def test_failed_save_rolls_back_clear(self):
+        """Failed save during clear rolls back in-memory state."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store = PersistentVectorStore(path)
+            store.add([VectorRecord(id="1", text="a", embedding=[1.0, 0.0], metadata={})])
+            assert store.count() == 1
+
+            # Make the file read-only to force save failure
+            os.chmod(path, 0o444)
+
+            try:
+                with pytest.raises(Exception):
+                    store.clear()
+            finally:
+                os.chmod(path, 0o644)
+
+            # Record should still be there (rollback worked)
+            assert store.count() == 1
+
+        finally:
+            self._cleanup(path)
+
+    def test_empty_file_behavior_consistent(self):
+        """Empty file behavior is consistent with absent file."""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp:
+            path = tmp.name
+
+        try:
+            store1 = PersistentVectorStore(path)
+            assert store1.count() == 0
+            assert store1.dimension is None
+
+            # Add a record
+            store1.add([VectorRecord(id="1", text="a", embedding=[1.0, 0.0], metadata={})])
+            assert store1.count() == 1
+
+            # Truncate file manually
+            with open(path, "w") as f:
+                pass  # Empty file
+
+            # Reload should give empty store
+            store2 = PersistentVectorStore(path)
+            assert store2.count() == 0
+            assert store2.dimension is None
+
+        finally:
+            self._cleanup(path)
