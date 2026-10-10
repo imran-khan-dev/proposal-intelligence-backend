@@ -4,8 +4,10 @@ import pytest
 import tempfile
 import os
 import json
+from unittest.mock import patch
 
 from app.rag.store import InMemoryVectorStore, PersistentVectorStore, VectorRecord, SearchResult
+from app.rag.store_factory import get_vector_store
 
 
 class TestInMemoryVectorStore:
@@ -634,3 +636,85 @@ class TestPersistentVectorStore:
 
         finally:
             self._cleanup(path)
+
+
+class TestVectorStoreFactory:
+    """Tests for get_vector_store factory function."""
+
+    def test_default_type_is_memory(self):
+        """Default VECTOR_STORE_TYPE is memory."""
+        with patch.dict(os.environ, {}, clear=True):
+            store = get_vector_store()
+            assert isinstance(store, InMemoryVectorStore)
+
+    def test_explicit_memory_type(self):
+        """Explicit memory type returns InMemoryVectorStore."""
+        with patch.dict(os.environ, {"VECTOR_STORE_TYPE": "memory"}, clear=True):
+            store = get_vector_store()
+            assert isinstance(store, InMemoryVectorStore)
+
+    def test_persistent_type_returns_persistent_store(self):
+        """Persistent type returns PersistentVectorStore with default path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"VECTOR_STORE_TYPE": "persistent", "VECTOR_STORE_PATH": os.path.join(tmpdir, "test.jsonl")}, clear=True):
+                store = get_vector_store()
+                assert isinstance(store, PersistentVectorStore)
+                assert store.count() == 0
+
+    def test_custom_persistent_path(self):
+        """Custom VECTOR_STORE_PATH is honored."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom_path = os.path.join(tmpdir, "custom", "vector_store.jsonl")
+            with patch.dict(os.environ, {"VECTOR_STORE_TYPE": "persistent", "VECTOR_STORE_PATH": custom_path}, clear=True):
+                store = get_vector_store()
+                assert isinstance(store, PersistentVectorStore)
+                # Verify the store can be used
+                store.add([VectorRecord(id="1", text="test", embedding=[0.1, 0.2], metadata={})])
+                assert store.count() == 1
+
+    def test_case_insensitive_store_type(self):
+        """Store type is case-insensitive."""
+        with patch.dict(os.environ, {"VECTOR_STORE_TYPE": "MEMORY"}, clear=True):
+            store = get_vector_store()
+            assert isinstance(store, InMemoryVectorStore)
+
+        with patch.dict(os.environ, {"VECTOR_STORE_TYPE": " Persistent "}, clear=True):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = os.path.join(tmpdir, "test.jsonl")
+                with patch.dict(os.environ, {"VECTOR_STORE_TYPE": " Persistent ", "VECTOR_STORE_PATH": path}, clear=True):
+                    store = get_vector_store()
+                    assert isinstance(store, PersistentVectorStore)
+
+    def test_unsupported_store_type_raises(self):
+        """Unsupported store type raises clear error."""
+        with patch.dict(os.environ, {"VECTOR_STORE_TYPE": "invalid_type"}, clear=True):
+            with pytest.raises(RuntimeError, match="Invalid VECTOR_STORE_TYPE: 'invalid_type'"):
+                get_vector_store()
+
+    def test_explicit_store_injection_overrides_env(self):
+        """Explicit store argument in create_agent_service overrides env config."""
+        from app.rag.store import InMemoryVectorStore
+        from app.agent.service import create_agent_service
+        from unittest.mock import MagicMock
+        from app.ai.provider import AIProvider
+
+        # Even with persistent in env, explicit store should be used
+        with patch.dict(os.environ, {"VECTOR_STORE_TYPE": "persistent"}, clear=True):
+            mock_provider = MagicMock(spec=AIProvider)
+            explicit_store = InMemoryVectorStore()
+            service = create_agent_service(provider=mock_provider, store=explicit_store)
+
+            # The service should use the explicitly provided store
+            assert service.store is explicit_store
+            assert isinstance(service.store, InMemoryVectorStore)
+
+    def test_factory_creates_parent_directory(self):
+        """Factory creates parent directory for persistent store."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom_path = os.path.join(tmpdir, "nested", "dir", "vector_store.jsonl")
+            with patch.dict(os.environ, {"VECTOR_STORE_TYPE": "persistent", "VECTOR_STORE_PATH": custom_path}, clear=True):
+                # Should not raise even though parent dirs don't exist
+                store = get_vector_store()
+                assert isinstance(store, PersistentVectorStore)
+                # Verify parent dir was created
+                assert os.path.exists(os.path.dirname(custom_path))

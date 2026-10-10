@@ -18,6 +18,7 @@ from app.ai.factory import get_provider
 from app.ai.provider import AIProvider
 from app.agent.tools import ToolRegistry
 from app.rag.store import InMemoryVectorStore, VectorStore
+from app.rag.store_factory import get_vector_store
 from app.schemas.agent import AgentRunRequest, AgentRunResponse, ToolCallRecord
 
 SYSTEM_PROMPT = """You are a helpful assistant with access to tools.
@@ -204,7 +205,7 @@ def create_agent_service(
     if embedder is None:
         embedder = get_embedding_provider()
     if store is None:
-        store = InMemoryVectorStore()
+        store = get_vector_store()
 
     from app.agent.builtin_tools import (
         calculate_total,
