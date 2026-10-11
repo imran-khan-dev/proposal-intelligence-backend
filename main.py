@@ -4,13 +4,11 @@ load_dotenv()
 
 from fastapi import FastAPI
 
-from app.api.agent import router as agent_router
-from app.api.rfp import router as rfp_router
+from app.router import router
 
 app = FastAPI(title="Proposal Intelligence API")
 
-app.include_router(rfp_router)
-app.include_router(agent_router)
+app.include_router(router, prefix="/api")
 
 
 @app.get("/health")

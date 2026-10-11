@@ -16,10 +16,10 @@ from app.ai.embedding_factory import get_embedding_provider
 from app.ai.embeddings import EmbeddingProvider
 from app.ai.factory import get_provider
 from app.ai.provider import AIProvider
-from app.agent.tools import ToolRegistry
+from app.agent_core.tools import ToolRegistry
 from app.rag.store import InMemoryVectorStore, VectorStore
 from app.rag.store_factory import get_vector_store
-from app.schemas.agent import AgentRunRequest, AgentRunResponse, ToolCallRecord
+from app.modules.agent.schema import AgentRunRequest, AgentRunResponse, ToolCallRecord
 
 SYSTEM_PROMPT = """You are a helpful assistant with access to tools.
 
@@ -33,7 +33,7 @@ Available tools:
 
 If a tool is not needed, answer directly from your knowledge."""
 
-
+# Agent Step 2: Agent Register Here and Agent is Used from Here
 class AgentService:
     """Orchestrates tool-calling with a configured AI provider."""
 
@@ -179,7 +179,7 @@ class AgentService:
             rounds_used=request.max_tool_rounds,
         )
 
-
+# Agent Step 1: Build the AgentService
 def create_agent_service(
     provider: AIProvider = None,
     embedder: EmbeddingProvider = None,
@@ -207,12 +207,12 @@ def create_agent_service(
     if store is None:
         store = get_vector_store()
 
-    from app.agent.builtin_tools import (
+    from app.agent_core.builtin_tools import (
         calculate_total,
         count_requirements,
         create_search_company_knowledge_tool,
     )
-    from app.agent.tools import Tool
+    from app.agent_core.tools import Tool
 
     registry.register(
         Tool(
@@ -281,6 +281,7 @@ def create_agent_service(
         embedder=embedder,
         store=store,
     )
+
     registry.register(
         Tool(
             name="search_company_knowledge",
