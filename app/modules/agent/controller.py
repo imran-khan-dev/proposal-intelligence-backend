@@ -30,6 +30,3 @@ async def run_agent_controller(
             status_code=500,
             detail="An unexpected error occurred while running the agent.",
         ) from exc
-
-    finally:
-        await service.close()

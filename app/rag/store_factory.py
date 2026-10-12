@@ -3,46 +3,24 @@
 import os
 
 from app.rag.store import InMemoryVectorStore, PersistentVectorStore, VectorStore
+from app.core.singletons import (
+    get_vector_store as _get_vector_store_singleton,
+    _create_vector_store,
+)
 
 
 def get_vector_store() -> VectorStore:
-    """Select and instantiate a vector store based on environment configuration.
+    """Return the vector store singleton if initialized, otherwise create a new one.
 
-    Supported stores:
-    - memory: In-memory vector store (default)
-    - persistent: File-based persistent vector store using JSONL
+    In the FastAPI application, the singleton is initialized at startup via lifespan.
+    In CLI or other contexts, a new instance is created each call (backward compatible).
 
-    Environment variables:
-    - VECTOR_STORE_TYPE: "memory" or "persistent" (default: "memory")
-    - VECTOR_STORE_PATH: Path for persistent store (default: ./data/vector_store.jsonl)
-
-    Returns:
-        A VectorStore instance.
-
-    Raises:
-        RuntimeError: If store type is unknown or persistent store initialization fails.
+    Note: For persistent store in CLI context, a new instance is created each call,
+    which reloads the JSONL file. This is acceptable for CLI usage but means
+    concurrent CLI + API access to persistent store may have consistency issues.
     """
-    store_type = (
-        os.environ.get("VECTOR_STORE_TYPE", "memory")
-        .strip()
-        .strip('"')
-        .strip("'")
-        .lower()
-    )
-
-    if store_type == "memory":
-        return InMemoryVectorStore()
-
-    if store_type == "persistent":
-        path = os.environ.get("VECTOR_STORE_PATH")
-        if not path:
-            # Default to a local data directory
-            path = os.path.join(os.getcwd(), "data", "vector_store.jsonl")
-        # Ensure parent directory exists
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        return PersistentVectorStore(path)
-
-    raise RuntimeError(
-        f"Invalid VECTOR_STORE_TYPE: '{store_type}'. "
-        "Must be 'memory' or 'persistent'."
-    )
+    try:
+        return _get_vector_store_singleton()
+    except RuntimeError:
+        # Singleton not initialized (e.g., CLI context), create new instance
+        return _create_vector_store()

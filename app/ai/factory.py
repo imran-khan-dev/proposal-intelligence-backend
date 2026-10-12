@@ -4,10 +4,11 @@ from app.ai.kilo import KiloProvider
 from app.ai.ollama import OllamaProvider
 from app.ai.openai import OpenAIProvider
 from app.ai.provider import AIProvider
+from app.core.singletons import get_ai_provider as _get_ai_provider_singleton
 
 
-def get_provider() -> AIProvider:
-    """Select and instantiate an AI provider based on environment configuration."""
+def _create_ai_provider() -> AIProvider:
+    """Create a new AI provider instance (not singleton)."""
     provider_name = (
         os.environ.get("AI_PROVIDER", "openai")
         .strip()
@@ -48,3 +49,16 @@ def get_provider() -> AIProvider:
         f"Invalid AI_PROVIDER: '{provider_name}'. "
         "Must be 'ollama', 'openai', or 'kilo'."
     )
+
+
+def get_provider() -> AIProvider:
+    """Return the AI provider singleton if initialized, otherwise create a new one.
+
+    In the FastAPI application, the singleton is initialized at startup via lifespan.
+    In CLI or other contexts, a new instance is created each call (backward compatible).
+    """
+    try:
+        return _get_ai_provider_singleton()
+    except RuntimeError:
+        # Singleton not initialized (e.g., CLI context), create new instance
+        return _create_ai_provider()
