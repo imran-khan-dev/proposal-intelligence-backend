@@ -12,6 +12,7 @@ load_dotenv()
 from app.ai.embedding_factory import get_embedding_provider
 from app.rag.ingest import ingest_document
 from app.rag.store_factory import get_vector_store
+from app.core.database import initialize_database, is_database_initialized
 
 
 SUPPORTED_EXTENSIONS = {".txt", ".md"}
@@ -116,6 +117,11 @@ def main(argv: list[str] = None) -> int:
         print(f"Document ID: {doc_id}")
         print(f"File size: {args.file.stat().st_size} bytes")
         print(f"Chunk size: {args.chunk_size}, Overlap: {args.overlap}")
+
+    # Initialize database if using PostgreSQL vector store
+    store_type = os.environ.get("VECTOR_STORE_TYPE", "memory").lower()
+    if store_type == "postgresql" and not is_database_initialized():
+        initialize_database()
 
     # Initialize embedding provider and vector store via factories
     try:

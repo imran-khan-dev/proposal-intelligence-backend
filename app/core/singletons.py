@@ -118,9 +118,14 @@ def _create_vector_store() -> VectorStore:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         return PersistentVectorStore(path)
 
+    if store_type == "postgresql":
+        # Lazy import to avoid circular dependency
+        from app.rag.stores.postgres_vector_store import PostgreSQLVectorStore
+        return PostgreSQLVectorStore()
+
     raise RuntimeError(
         f"Invalid VECTOR_STORE_TYPE: '{store_type}'. "
-        "Must be 'memory' or 'persistent'."
+        "Must be 'memory', 'persistent', or 'postgresql'."
     )
 
 
