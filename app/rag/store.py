@@ -43,10 +43,42 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
+    async def async_add(self, records: List[VectorRecord]) -> None:
+        """Asynchronously add records to the store.
+
+        Args:
+            records: List of VectorRecord objects to add.
+
+        Raises:
+            ValueError: If any record has invalid embedding dimension
+                or if records have inconsistent dimensions.
+        """
+        ...
+
+    @abstractmethod
     def search(
         self, query_embedding: List[float], k: int = 5
     ) -> List[SearchResult]:
         """Search for the top-k most similar records.
+
+        Args:
+            query_embedding: The query vector to search for.
+            k: Number of top results to return (default: 5).
+
+        Returns:
+            List of SearchResult objects sorted by similarity (highest first).
+            Returns empty list if store is empty or k <= 0.
+
+        Raises:
+            ValueError: If query_embedding has invalid dimension.
+        """
+        ...
+
+    @abstractmethod
+    async def async_search(
+        self, query_embedding: List[float], k: int = 5
+    ) -> List[SearchResult]:
+        """Asynchronously search for the top-k most similar records.
 
         Args:
             query_embedding: The query vector to search for.
@@ -76,13 +108,37 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
+    async def async_delete_by_metadata(self, metadata_filter: dict[str, Any]) -> int:
+        """Asynchronously delete records matching a metadata filter.
+
+        Args:
+            metadata_filter: Dictionary of key/value pairs. A record matches
+                if its metadata contains all specified key/value pairs.
+                An empty filter is a no-op and returns 0.
+
+        Returns:
+            Number of records deleted.
+        """
+        ...
+
+    @abstractmethod
     def clear(self) -> None:
         """Remove all records from the store."""
         ...
 
     @abstractmethod
+    async def async_clear(self) -> None:
+        """Asynchronously remove all records from the store."""
+        ...
+
+    @abstractmethod
     def count(self) -> int:
         """Return the number of records in the store."""
+        ...
+
+    @abstractmethod
+    async def async_count(self) -> int:
+        """Asynchronously return the number of records in the store."""
         ...
 
     @property
@@ -215,6 +271,28 @@ class InMemoryVectorStore(VectorStore):
     @property
     def dimension(self) -> Optional[int]:
         return self._dimension
+
+    async def async_add(self, records: List[VectorRecord]) -> None:
+        """Async wrapper for add (sync implementation)."""
+        self.add(records)
+
+    async def async_search(
+        self, query_embedding: List[float], k: int = 5
+    ) -> List[SearchResult]:
+        """Async wrapper for search (sync implementation)."""
+        return self.search(query_embedding, k)
+
+    async def async_delete_by_metadata(self, metadata_filter: dict[str, Any]) -> int:
+        """Async wrapper for delete_by_metadata (sync implementation)."""
+        return self.delete_by_metadata(metadata_filter)
+
+    async def async_clear(self) -> None:
+        """Async wrapper for clear (sync implementation)."""
+        self.clear()
+
+    async def async_count(self) -> int:
+        """Async wrapper for count (sync implementation)."""
+        return self.count()
 
 
 class PersistentVectorStore(VectorStore):
@@ -512,3 +590,25 @@ class PersistentVectorStore(VectorStore):
     @property
     def dimension(self) -> Optional[int]:
         return self._dimension
+
+    async def async_add(self, records: List[VectorRecord]) -> None:
+        """Async wrapper for add (sync implementation)."""
+        self.add(records)
+
+    async def async_search(
+        self, query_embedding: List[float], k: int = 5
+    ) -> List[SearchResult]:
+        """Async wrapper for search (sync implementation)."""
+        return self.search(query_embedding, k)
+
+    async def async_delete_by_metadata(self, metadata_filter: dict[str, Any]) -> int:
+        """Async wrapper for delete_by_metadata (sync implementation)."""
+        return self.delete_by_metadata(metadata_filter)
+
+    async def async_clear(self) -> None:
+        """Async wrapper for clear (sync implementation)."""
+        self.clear()
+
+    async def async_count(self) -> int:
+        """Async wrapper for count (sync implementation)."""
+        return self.count()

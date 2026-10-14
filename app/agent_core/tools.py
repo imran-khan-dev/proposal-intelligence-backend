@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Awaitable
+import inspect
 
 
 @dataclass
@@ -56,4 +57,23 @@ class ToolRegistry:
                 f"Unknown tool: '{name}'. "
                 f"Available tools: {self.names()}"
             )
-        return tool.handler(**arguments)
+        result = tool.handler(**arguments)
+        if inspect.isawaitable(result):
+            raise RuntimeError(
+                f"Tool '{name}' is async but ToolRegistry.execute() is synchronous. "
+                f"Use ToolRegistry.async_execute() instead."
+            )
+        return result
+
+    async def async_execute(self, name: str, arguments: dict) -> Any:
+        """Asynchronously execute a registered tool by name with validated arguments."""
+        tool = self._tools.get(name)
+        if tool is None:
+            raise ValueError(
+                f"Unknown tool: '{name}'. "
+                f"Available tools: {self.names()}"
+            )
+        result = tool.handler(**arguments)
+        if inspect.isawaitable(result):
+            return await result
+        return result

@@ -4,22 +4,44 @@ Flow:
   1. Build the initial message list (system + user).
   2. Call provider.chat_with_tools(messages, tools).
   3. Inspect the response for tool_calls.
-  4. If no tool_calls → return the model's final answer.
+  4. If no tool_calls → return the model'"'"'s final answer.
   5. If tool_calls → validate tool name and arguments, execute,
      append tool results to messages, and repeat from step 2.
   6. Stop after max_tool_rounds to prevent infinite loops.
 """
 
 from typing import Any, Optional
+import uuid
 
 from app.ai.embedding_factory import get_embedding_provider
 from app.ai.embeddings import EmbeddingProvider
-from app.ai.factory import get_provider
+from app.ai.factory import get_agent_provider
 from app.ai.provider import AIProvider
 from app.agent_core.tools import ToolRegistry
-from app.rag.store import InMemoryVectorStore, VectorStore
+from app.rag.store import VectorStore
 from app.rag.store_factory import get_vector_store
 from app.modules.agent.schema import AgentRunRequest, AgentRunResponse, ToolCallRecord
+
+
+class Conversation(list):
+    """Per-run message list carrying a durable ``conversation_id``.
+
+    ``AgentService.run`` builds the message history once and reuses the same list
+    object across every provider call in the run. The AI provider is a shared
+    singleton and ``chat_with_tools`` takes no run-scoped handle, so the stable
+    per-run identity is attached here as ``conversation_id``. Stateful providers
+    (e.g. Google Gemini) use it to scope ``previous_interaction_id`` to this run
+    without changing the ``AIProvider`` interface, so Ollama/OpenAI/Kilo are
+    untouched.
+    """
+
+    conversation_id: str
+
+    def __init__(self, items=None, conversation_id: str = "") -> None:
+        super().__init__(items if items is not None else [])
+        self.conversation_id = conversation_id
+
+
 
 SYSTEM_PROMPT = """You are a helpful assistant with access to tools.
 
@@ -33,6 +55,7 @@ Available tools:
 
 If a tool is not needed, answer directly from your knowledge."""
 
+
 # Agent Step 2: Agent Register Here and Agent is Used from Here
 class AgentService:
     """Orchestrates tool-calling with a configured AI provider."""
@@ -45,11 +68,14 @@ class AgentService:
         self.embedder: Optional[EmbeddingProvider] = None
         self.store: Optional[VectorStore] = None
 
-    def run(self, request: AgentRunRequest) -> AgentRunResponse:
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": request.message},
-        ]
+    async def run(self, request: AgentRunRequest) -> AgentRunResponse:
+        messages: list[dict[str, Any]] = Conversation(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": request.message},
+            ],
+            conversation_id=str(uuid.uuid4()),
+        )
         tools = self._registry.to_openai_format()
 
         tool_call_records: list[ToolCallRecord] = []
@@ -145,7 +171,9 @@ class AgentService:
 
                 # Execute the tool
                 try:
-                    result = self._registry.execute(tool_name, arguments)
+                    result = await self._registry.async_execute(
+                        tool_name, arguments
+                    )
                 except (TypeError, ValueError) as exc:
                     raise RuntimeError(
                         f"Tool '{tool_name}' failed: {exc}"
@@ -179,6 +207,7 @@ class AgentService:
             rounds_used=request.max_tool_rounds,
         )
 
+
 # Agent Step 1: Build the AgentService
 def create_agent_service(
     provider: AIProvider = None,
@@ -188,7 +217,7 @@ def create_agent_service(
     """Build an AgentService with the configured provider and default tools.
 
     Args:
-        provider: AI provider for chat completions. If None, uses get_provider().
+        provider: AI provider for chat completions. If None, uses get_agent_provider().
         embedder: Embedding provider for RAG. If None, uses get_embedding_provider().
         store: Vector store for RAG. If None, creates InMemoryVectorStore().
                Pass a PersistentVectorStore for persistent knowledge.
@@ -198,7 +227,7 @@ def create_agent_service(
         and search_company_knowledge tools registered.
     """
     if provider is None:
-        provider = get_provider()
+        provider = get_agent_provider()
     registry = ToolRegistry()
 
     # Create shared embedding provider and vector store for RAG

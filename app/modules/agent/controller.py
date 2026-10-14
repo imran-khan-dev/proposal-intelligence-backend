@@ -15,7 +15,7 @@ async def run_agent_controller(
 
     try:
         service = create_agent_service()
-        return service.run(request)
+        return await service.run(request)
 
     except RuntimeError as exc:
         logger.exception("Agent execution failed")

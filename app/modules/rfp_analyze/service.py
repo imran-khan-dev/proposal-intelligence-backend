@@ -1,7 +1,7 @@
 import os
 from pypdf import PdfReader
 
-from app.ai.factory import get_provider
+from app.ai.factory import get_rfp_provider
 from app.modules.rfp_analyze.schema import RFPAnalysis
 
 SYSTEM_PROMPT = """You are an expert analyst specializing in Request for Proposal (RFP) documents.
@@ -43,7 +43,10 @@ def extract_pdf_text(file_path: str) -> str:
 
 def analyze_text(rfp_text: str) -> RFPAnalysis:
     """Send RFP text to the configured AI provider and return a structured RFPAnalysis."""
-    provider = get_provider()
+    provider = get_rfp_provider()
+
+    print(f"Model AI: {provider}")
+
 
     user_content = f"Analyze the following RFP document:\n\n{rfp_text}"
 

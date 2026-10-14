@@ -16,6 +16,8 @@ from app.rag.store import VectorStore
 from app.ai.kilo import KiloProvider
 from app.ai.ollama import OllamaProvider
 from app.ai.openai import OpenAIProvider
+from app.ai.google import GoogleProvider
+from app.ai.groq import GroqProvider
 from app.ai.embeddings_local import LocalEmbeddingProvider
 from app.ai.embeddings_api import ApiEmbeddingProvider
 from app.rag.store import InMemoryVectorStore, PersistentVectorStore
@@ -56,20 +58,51 @@ def _create_ai_provider() -> AIProvider:
         return OpenAIProvider(api_key=api_key, model=model)
 
     if provider_name == "kilo":
+        print("[AI Provider] Selected provider: Kilo")
         api_key = os.environ.get("KILO_API_KEY")
+        print(f"[Kilo] API key configured: {bool(api_key)}")
         if not api_key:
             raise RuntimeError("KILO_API_KEY environment variable is not set")
         base_url = os.environ.get(
             "KILO_BASE_URL", "https://api.kilo.ai/api/gateway"
         )
+        print(f"[Kilo] Base URL: {base_url}")
+
         model = os.environ.get("KILO_MODEL")
+
+        print(f"[Kilo] Model: {model}")
+        
         if not model:
             raise RuntimeError("KILO_MODEL environment variable is not set")
         return KiloProvider(api_key=api_key, base_url=base_url, model=model)
 
+    if provider_name == "google":
+        print("[AI Provider] Selected provider: Google")
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        print(f"[Google] API key configured: {bool(api_key)}")
+        if not api_key:
+            raise RuntimeError("GOOGLE_API_KEY environment variable is not set")
+        model = os.environ.get("GOOGLE_MODEL", "gemini-3.8-flash")
+        print(f"[Google] Model: {model}")
+        return GoogleProvider(api_key=api_key, model=model)
+
+    if provider_name == "groq":
+        print("[AI Provider] Selected provider: Groq")
+        api_key = os.environ.get("GROQ_API_KEY")
+        print(f"[Groq] API key configured: {bool(api_key)}")
+        if not api_key:
+            raise RuntimeError("GROQ_API_KEY environment variable is not set")
+        base_url = os.environ.get(
+            "GROQ_BASE_URL", "https://api.groq.com/openai/v1"
+        )
+        print(f"[Groq] Base URL: {base_url}")
+        model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+        print(f"[Groq] Model: {model}")
+        return GroqProvider(api_key=api_key, base_url=base_url, model=model)
+
     raise RuntimeError(
         f"Invalid AI_PROVIDER: '{provider_name}'. "
-        "Must be 'ollama', 'openai', or 'kilo'."
+        "Must be 'ollama', 'openai', 'kilo', 'google', or 'groq'."
     )
 
 

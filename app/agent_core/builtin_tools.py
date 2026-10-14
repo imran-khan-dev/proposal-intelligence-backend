@@ -1,9 +1,9 @@
 """Simple tools for the tool-calling demonstration."""
 
 from typing import Any
+import asyncio
 
 from app.ai.embeddings import EmbeddingProvider
-from app.rag.retrieve import retrieve
 from app.rag.store import VectorStore
 
 
@@ -89,10 +89,10 @@ def create_search_company_knowledge_tool(
         store: Vector store to search (shared instance).
 
     Returns:
-        A handler function with signature (query: str, top_k: int = 5) -> list[dict].
+        An async handler function with signature (query: str, top_k: int = 5) -> list[dict].
     """
 
-    def search_company_knowledge(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+    async def search_company_knowledge(query: str, top_k: int = 5) -> list[dict[str, Any]]:
         """Search the company knowledge base for relevant information.
 
         Args:
@@ -108,7 +108,21 @@ def create_search_company_knowledge_tool(
         if top_k <= 0:
             raise ValueError("top_k must be positive")
 
-        results = retrieve(query=query, embedder=embedder, store=store, top_k=top_k)
+        if not query or not query.strip():
+            return []
+
+        # Run embedding in thread pool to avoid blocking event loop
+        query_embeddings = await asyncio.to_thread(embedder.embed, [query])
+        if not query_embeddings:
+            return []
+        query_embedding = query_embeddings[0]
+
+        # Use async search if available (for PostgreSQLVectorStore)
+        if hasattr(store, 'async_search'):
+            results = await store.async_search(query_embedding=query_embedding, k=top_k)
+        else:
+            # Fallback to sync search for InMemoryVectorStore, PersistentVectorStore
+            results = await asyncio.to_thread(store.search, query_embedding, top_k)
 
         # Convert SearchResult objects to JSON-serializable dicts
         return [

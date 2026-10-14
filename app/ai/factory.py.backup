@@ -1,0 +1,83 @@
+import os
+
+from app.ai.google import GoogleProvider
+from app.ai.groq import GroqProvider
+from app.ai.kilo import KiloProvider
+from app.ai.ollama import OllamaProvider
+from app.ai.openai import OpenAIProvider
+from app.ai.provider import AIProvider
+from app.core.singletons import get_ai_provider as _get_ai_provider_singleton
+
+
+def _create_ai_provider() -> AIProvider:
+    """Create a new AI provider instance (not singleton)."""
+    provider_name = (
+        os.environ.get("AI_PROVIDER", "openai")
+        .strip()
+        .strip('"')
+        .strip("'")
+        .lower()
+    )
+
+    if provider_name == "ollama":
+        base_url = os.environ.get(
+            "OLLAMA_BASE_URL", "http://localhost:11434"
+        )
+        model = os.environ.get("OLLAMA_MODEL")
+        if not model:
+            raise RuntimeError("OLLAMA_MODEL environment variable is not set")
+        return OllamaProvider(base_url=base_url, model=model)
+
+    if provider_name == "openai":
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY environment variable is not set")
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        return OpenAIProvider(api_key=api_key, model=model)
+
+    if provider_name == "kilo":
+        api_key = os.environ.get("KILO_API_KEY")
+        if not api_key:
+            raise RuntimeError("KILO_API_KEY environment variable is not set")
+        base_url = os.environ.get(
+            "KILO_BASE_URL", "https://api.kilo.ai/api/gateway"
+        )
+        model = os.environ.get("KILO_MODEL")
+        if not model:
+            raise RuntimeError("KILO_MODEL environment variable is not set")
+        return KiloProvider(api_key=api_key, base_url=base_url, model=model)
+
+    if provider_name == "google":
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise RuntimeError("GOOGLE_API_KEY environment variable is not set")
+        model = os.environ.get("GOOGLE_MODEL", "gemini-3.8-flash")
+        return GoogleProvider(api_key=api_key, model=model)
+
+    if provider_name == "groq":
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            raise RuntimeError("GROQ_API_KEY environment variable is not set")
+        base_url = os.environ.get(
+            "GROQ_BASE_URL", "https://api.groq.com/openai/v1"
+        )
+        model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+        return GroqProvider(api_key=api_key, base_url=base_url, model=model)
+
+    raise RuntimeError(
+        f"Invalid AI_PROVIDER: '{provider_name}'. "
+        "Must be 'ollama', 'openai', 'kilo', 'google', or 'groq'."
+    )
+
+
+def get_provider() -> AIProvider:
+    """Return the AI provider singleton if initialized, otherwise create a new one.
+
+    In the FastAPI application, the singleton is initialized at startup via lifespan.
+    In CLI or other contexts, a new instance is created each call (backward compatible).
+    """
+    try:
+        return _get_ai_provider_singleton()
+    except RuntimeError:
+        # Singleton not initialized (e.g., CLI context), create new instance
+        return _create_ai_provider()

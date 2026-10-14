@@ -3,6 +3,20 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 
+class Citation(BaseModel):
+    """A structured citation to a retrieved source chunk.
+
+    Created from search_company_knowledge results so that downstream
+    consumers can trace answer claims back to specific documents.
+    """
+
+    doc_id: str = Field(..., description="Document ID of the source")
+    chunk_index: int = Field(..., description="Index of the chunk within the document")
+    source_filename: str = Field(..., description="Original filename of the source document")
+    score: float = Field(..., description="Similarity score of this chunk (0.0 to 1.0)")
+    excerpt: str = Field(..., description="Text excerpt from the chunk (truncated)")
+
+
 class ToolCallRecord(BaseModel):
     """Record of a single tool call and its result."""
 
@@ -36,4 +50,9 @@ class AgentRunResponse(BaseModel):
     )
     rounds_used: int = Field(
         ..., description="Number of tool-call rounds executed"
+    )
+    citations: list[Citation] = Field(
+        default_factory=list,
+        description="Structured citations extracted from search_company_knowledge "
+        "tool results. Empty when no search was performed or no results returned.",
     )

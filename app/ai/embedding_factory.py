@@ -3,8 +3,6 @@
 import os
 
 from app.ai.embeddings import EmbeddingProvider
-from app.ai.embeddings_local import LocalEmbeddingProvider
-from app.ai.embeddings_api import ApiEmbeddingProvider
 from app.core.singletons import (
     get_embedding_provider as _get_embedding_provider_singleton,
     _create_embedding_provider,
