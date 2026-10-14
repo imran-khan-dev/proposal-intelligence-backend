@@ -19,7 +19,7 @@ class GroqProvider(AIProvider):
             base_url=base_url,
             timeout=120.0,
         )
-        self._model = model
+        self._model = model`r`n        self._max_tokens = max_tokens
 
     def generate_structured(
         self,

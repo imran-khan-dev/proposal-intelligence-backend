@@ -111,20 +111,19 @@ class _Completion:
 class GoogleProvider(AIProvider):
     """AI provider backed by the Google Gemini Interactions API."""
 
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, timeout: Optional[float] = None, max_retries: Optional[int] = None, max_tokens: Optional[int] = None):
         if not api_key:
             raise RuntimeError("GOOGLE_API_KEY environment variable is not set")
+        # Note: The current Google GenAI client does not appear to accept timeout or max_retries in the constructor.
+        # We store them for potential future use or if the SDK changes.
         self._client = genai.Client(api_key=api_key)
         self._model = model
+        self._timeout = timeout
+        self._max_retries = max_retries
+        self._max_tokens = max_tokens
         self._conversations: dict[str, _Conversation] = {}
         self._lock = threading.Lock()
-
-    def generate_structured(
-        self,
-        system_prompt: str,
-        user_text: str,
-        response_model: Type[T],
-    ) -> T:
+    def generate_structured(self, system_prompt: str, user_text: str, response_model: Type[T]) -> T:
         schema = response_model.model_json_schema()
         response_format = {
             "type": "text",

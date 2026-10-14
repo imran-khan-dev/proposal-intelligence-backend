@@ -1,4 +1,4 @@
-from typing import Any, Type, TypeVar
+from typing import Any, Type, TypeVar, Optional
 
 from openai import OpenAI
 from pydantic import BaseModel
@@ -9,15 +9,28 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class OllamaProvider(AIProvider):
-    """AI provider backed by a local Ollama instance."""
+    \"\"\"AI provider backed by a local Ollama instance.\"\"\"
 
-    def __init__(self, base_url: str, model: str):
-        self._client = OpenAI(
-            base_url=base_url,
-            api_key="ollama",
-            timeout=120.0,
-        )
+    def __init__(self, base_url: str, model: str, 
+                 timeout: Optional[float] = None, 
+                 max_retries: Optional[int] = None,
+                 max_tokens: Optional[int] = None):
+        # For Ollama, we preserve the current hardcoded timeout of 120.0 when timeout is not explicitly set via AI_TIMEOUT
+        client_timeout = timeout
+        if client_timeout is None:
+            client_timeout = 120.0  # Preserve existing behavior
+        
+        client_kwargs = {
+            "api_key": "ollama",  # Ollama uses a fixed API key
+            "base_url": base_url,
+            "timeout": client_timeout,
+        }
+        if max_retries is not None:
+            client_kwargs["max_retries"] = max_retries
+            
+        self._client = OpenAI(**client_kwargs)
         self._model = model
+        self._max_tokens = max_tokens
 
     def generate_structured(
         self,
@@ -25,16 +38,19 @@ class OllamaProvider(AIProvider):
         user_text: str,
         response_model: Type[T],
     ) -> T:
-        completion = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
+        request_kwargs = {
+            "model": self._model,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_text},
             ],
-        )
+        }
+        if self._max_tokens is not None:
+            request_kwargs["max_tokens"] = self._max_tokens
+            
+        completion = self._client.chat.completions.create(**request_kwargs)
 
         raw = completion.choices[0].message.content
-
         if not raw:
             raise RuntimeError("Ollama returned empty response")
 
@@ -51,9 +67,13 @@ class OllamaProvider(AIProvider):
         messages: list[dict],
         tools: list[dict],
     ) -> Any:
-        return self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-        )
+        request_kwargs = {
+            "model": self._model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+        if self._max_tokens is not None:
+            request_kwargs["max_tokens"] = self._max_tokens
+            
+        return self._client.chat.completions.create(**request_kwargs)
