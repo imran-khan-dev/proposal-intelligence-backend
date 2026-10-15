@@ -46,22 +46,9 @@ async def analyze_rfp_controller(file: UploadFile) -> RFPAnalysis:
 
         try:
             return analyze_rfp(temp_path)
-
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=422, detail=str(exc)
-            ) from exc
-
-        except RuntimeError as exc:
-            raise HTTPException(
-                status_code=502, detail=str(exc)
-            ) from exc
-
         except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"AI provider request failed: {exc}",
-            ) from exc
+            from app.ai.error_handling import handle_ai_exception
+            raise handle_ai_exception(exc)
 
     finally:
         await file.close()
