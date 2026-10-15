@@ -30,13 +30,14 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
-from typing import Any, Type, TypeVar
+from typing import Any, Optional, Type, TypeVar
 
 import httpx
 from pydantic import BaseModel
 
 from google import genai
 from google.genai import errors as _genai_errors
+from google.genai.types import HttpOptions, HttpRetryOptions
 
 from app.ai.provider import AIProvider
 
@@ -114,9 +115,20 @@ class GoogleProvider(AIProvider):
     def __init__(self, api_key: str, model: str, timeout: Optional[float] = None, max_retries: Optional[int] = None, max_tokens: Optional[int] = None):
         if not api_key:
             raise RuntimeError("GOOGLE_API_KEY environment variable is not set")
-        # Note: The current Google GenAI client does not appear to accept timeout or max_retries in the constructor.
-        # We store them for potential future use or if the SDK changes.
-        self._client = genai.Client(api_key=api_key)
+        # The Google GenAI Client accepts timeout and retry settings via
+        # HttpOptions (the constructor itself does not take timeout/max_retries
+        # directly).  max_tokens is forwarded to the Interactions API via
+        # generation_config={"max_output_tokens": N}, which is a supported
+        # body key in _CREATE_BODY_KEYS.
+        client_kwargs = {"api_key": api_key}
+        http_options_kwargs: dict[str, Any] = {}
+        if timeout is not None:
+            http_options_kwargs["timeout"] = int(timeout)
+        if max_retries is not None:
+            http_options_kwargs["retry_options"] = HttpRetryOptions(attempts=max_retries)
+        if http_options_kwargs:
+            client_kwargs["http_options"] = HttpOptions(**http_options_kwargs)
+        self._client = genai.Client(**client_kwargs)
         self._model = model
         self._timeout = timeout
         self._max_retries = max_retries
@@ -130,13 +142,16 @@ class GoogleProvider(AIProvider):
             "mime_type": "application/json",
             "schema": schema,
         }
+        create_kwargs: dict[str, Any] = {
+            "model": self._model,
+            "input": user_text,
+            "system_instruction": system_prompt,
+            "response_format": response_format,
+        }
+        if self._max_tokens is not None:
+            create_kwargs["generation_config"] = {"max_output_tokens": self._max_tokens}
         try:
-            interaction = self._client.interactions.create(
-                model=self._model,
-                input=user_text,
-                system_instruction=system_prompt,
-                response_format=response_format,
-            )
+            interaction = self._client.interactions.create(**create_kwargs)
         except _API_ERRORS as exc:
             raise RuntimeError(
                 f"Google API call failed: {_sanitize_error(exc)}"
@@ -207,6 +222,9 @@ class GoogleProvider(AIProvider):
                 "tools": converted_tools,
                 "previous_interaction_id": conv.interaction_id,
             }
+
+        if self._max_tokens is not None:
+            create_kwargs["generation_config"] = {"max_output_tokens": self._max_tokens}
 
         try:
             interaction = self._client.interactions.create(**create_kwargs)

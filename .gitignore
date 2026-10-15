@@ -39,6 +39,9 @@ junit.xml
 *.tmp
 *.temp
 *.bak
+*.bak2
+*.bak3
+*.backup
 *.swp
 *.swo
 .DS_Store

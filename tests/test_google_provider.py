@@ -14,7 +14,7 @@ import pytest
 from pydantic import BaseModel
 
 from app.agent_core.tools import Tool, ToolRegistry
-from app.ai.factory import _create_ai_provider
+from app.ai.factory import _create_ai_provider, _create_ai_provider_from_env
 from app.ai.google import GoogleProvider
 from app.ai.groq import GroqProvider
 from app.ai.kilo import KiloProvider
@@ -513,3 +513,211 @@ def test_unsupported_provider_raises():
             _create_ai_provider()
     finally:
         os.environ.pop("AI_PROVIDER", None)
+
+
+# ---------------------------------------------------------------------------
+# 10. Google provider timeout and retry configuration via HttpOptions
+# ---------------------------------------------------------------------------
+
+
+def test_google_provider_accepts_timeout_and_max_retries():
+    provider = GoogleProvider(
+        api_key="test-key", model="gemini-3.8-flash", timeout=45.0, max_retries=3
+    )
+    assert provider._timeout == 45.0
+    assert provider._max_retries == 3
+    assert provider._max_tokens is None
+
+
+def test_google_provider_without_timeout_and_retries():
+    provider = GoogleProvider(api_key="test-key", model="gemini-3.8-flash")
+    assert provider._timeout is None
+    assert provider._max_retries is None
+
+
+def test_google_provider_accepts_max_tokens():
+    provider = GoogleProvider(
+        api_key="test-key", model="gemini-3.8-flash", max_tokens=512
+    )
+    assert provider._max_tokens == 512
+
+
+# ---------------------------------------------------------------------------
+# 11. Task-specific factory provider selection (RFP and AGENT prefixes)
+# ---------------------------------------------------------------------------
+
+
+def test_rfp_provider_uses_prefix_env(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "unit-test-key")
+    monkeypatch.setenv("RFP_AI_PROVIDER", "ollama")
+    monkeypatch.setenv("OLLAMA_MODEL", "test-model")
+    instance = _create_ai_provider_from_env(
+        "RFP", timeout=None, max_retries=None, max_tokens=None
+    )
+    assert isinstance(instance, OllamaProvider)
+    assert instance._model == "test-model"
+
+
+def test_rfp_provider_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "unit-test-key")
+    monkeypatch.delenv("RFP_AI_PROVIDER", raising=False)
+    instance = _create_ai_provider_from_env(
+        "RFP", timeout=None, max_retries=None, max_tokens=None
+    )
+    assert isinstance(instance, OpenAIProvider)
+
+
+def test_agent_provider_uses_prefix_env(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "unit-test-key")
+    monkeypatch.setenv("AGENT_AI_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "unit-test-key")
+    instance = _create_ai_provider_from_env(
+        "AGENT", timeout=None, max_retries=None, max_tokens=None
+    )
+    assert isinstance(instance, GroqProvider)
+
+
+def test_rfp_provider_with_empty_prefix_falls_back(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "kilo")
+    monkeypatch.setenv("KILO_API_KEY", "unit-test-key")
+    monkeypatch.setenv("KILO_MODEL", "kilo-auto/free")
+    monkeypatch.setenv("RFP_AI_PROVIDER", "")
+    instance = _create_ai_provider_from_env(
+        "RFP", timeout=None, max_retries=None, max_tokens=None
+    )
+    assert isinstance(instance, KiloProvider)
+
+
+def test_rfp_max_tokens_propagation(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "unit-test-key")
+    instance = _create_ai_provider_from_env(
+        "RFP", timeout=None, max_retries=None, max_tokens=100
+    )
+    assert isinstance(instance, OpenAIProvider)
+    assert instance._max_tokens == 100
+
+
+def test_agent_max_tokens_propagation(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "unit-test-key")
+    instance = _create_ai_provider_from_env(
+        "AGENT", timeout=None, max_retries=None, max_tokens=200
+    )
+    assert isinstance(instance, OpenAIProvider)
+    assert instance._max_tokens == 200
+
+
+def test_rfp_provider_task_specific_model(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "unit-test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+    monkeypatch.setenv("RFP_AI_PROVIDER", "openai")
+    monkeypatch.setenv("RFP_OPENAI_MODEL", "gpt-4o-mini")
+    monkeypatch.setenv("RFP_OPENAI_API_KEY", "rfp-specific-key")
+    instance = _create_ai_provider_from_env(
+        "RFP", timeout=None, max_retries=None, max_tokens=None
+    )
+    assert isinstance(instance, OpenAIProvider)
+    assert instance._model == "gpt-4o-mini"
+
+
+# ---------------------------------------------------------------------------
+# 12. Google provider forwards max_tokens to the Interactions API
+# ---------------------------------------------------------------------------
+
+
+def _structured_provider_captures_kwargs():
+    """Mock interactions.create that returns a valid structured response
+    and captures the kwargs it received."""
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            output_text='{"recipe_name":"Soup","ingredients":["carrot","onion"]}',
+            status="completed",
+            steps=[],
+        )
+    create.captured = captured
+    return create
+
+
+def test_generate_structured_includes_generation_config_when_max_tokens_set():
+    mock_create = _structured_provider_captures_kwargs()
+    provider = GoogleProvider(api_key="test-key", model="gemini-3.8-flash", max_tokens=256)
+    provider._client = SimpleNamespace(interactions=SimpleNamespace(create=mock_create))
+
+    provider.generate_structured(
+        system_prompt="system",
+        user_text="extract a recipe",
+        response_model=_Recipe,
+    )
+
+    assert mock_create.captured["model"] == "gemini-3.8-flash"
+    assert mock_create.captured["generation_config"] == {"max_output_tokens": 256}
+
+
+def test_generate_structured_omits_generation_config_when_max_tokens_none():
+    mock_create = _structured_provider_captures_kwargs()
+    provider = GoogleProvider(api_key="test-key", model="gemini-3.8-flash", max_tokens=None)
+    provider._client = SimpleNamespace(interactions=SimpleNamespace(create=mock_create))
+
+    provider.generate_structured(
+        system_prompt="system",
+        user_text="extract a recipe",
+        response_model=_Recipe,
+    )
+
+    assert "generation_config" not in mock_create.captured
+
+
+def _tool_call_provider_captures_kwargs():
+    """Mock interactions.create that returns a response with a function_call step
+    and captures the kwargs it received."""
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            id="test-interaction-id",
+            status="completed",
+            steps=[],
+            output_text="",
+        )
+    create.captured = captured
+    return create
+
+
+def test_chat_with_tools_includes_generation_config_when_max_tokens_set():
+    mock_create = _tool_call_provider_captures_kwargs()
+    provider = GoogleProvider(api_key="test-key", model="gemini-3.8-flash", max_tokens=128)
+    provider._client = SimpleNamespace(interactions=SimpleNamespace(create=mock_create))
+
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Count the items: a, b, c"},
+    ]
+    provider.chat_with_tools(messages, [])
+
+    assert mock_create.captured["model"] == "gemini-3.8-flash"
+    assert mock_create.captured["generation_config"] == {"max_output_tokens": 128}
+
+
+def test_chat_with_tools_omits_generation_config_when_max_tokens_none():
+    mock_create = _tool_call_provider_captures_kwargs()
+    provider = GoogleProvider(api_key="test-key", model="gemini-3.8-flash", max_tokens=None)
+    provider._client = SimpleNamespace(interactions=SimpleNamespace(create=mock_create))
+
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Count the items: a, b, c"},
+    ]
+    provider.chat_with_tools(messages, [])
+
+    assert "generation_config" not in mock_create.captured
+
+

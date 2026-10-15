@@ -18,10 +18,54 @@ def handle_ai_exception(exc: Exception) -> HTTPException:
 
     # Handle OpenAI-related exceptions (used by Ollama, OpenAI, Kilo, Groq)
     try:
-        from openai import APIError, RateLimitError, AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError, UnprocessableEntityError, InternalServerError, ServiceUnavailableError, GatewayTimeoutError
+        from openai import APIError
     except ImportError:
-        # If openai is not installed, we'll skip this block
-        APIError = RateLimitError = AuthenticationError = PermissionDeniedError = NotFoundError = BadRequestError = UnprocessableEntityError = InternalServerError = ServiceUnavailableError = GatewayTimeoutError = type(None)  # type: ignore
+        APIError = None
+
+    try:
+        from openai import RateLimitError
+    except ImportError:
+        RateLimitError = None
+
+    try:
+        from openai import AuthenticationError
+    except ImportError:
+        AuthenticationError = None
+
+    try:
+        from openai import PermissionDeniedError
+    except ImportError:
+        PermissionDeniedError = None
+
+    try:
+        from openai import NotFoundError
+    except ImportError:
+        NotFoundError = None
+
+    try:
+        from openai import BadRequestError
+    except ImportError:
+        BadRequestError = None
+
+    try:
+        from openai import UnprocessableEntityError
+    except ImportError:
+        UnprocessableEntityError = None
+
+    try:
+        from openai import InternalServerError
+    except ImportError:
+        InternalServerError = None
+
+    try:
+        from openai import ServiceUnavailableError
+    except ImportError:
+        ServiceUnavailableError = None
+
+    try:
+        from openai import GatewayTimeoutError
+    except ImportError:
+        GatewayTimeoutError = None
 
     # Handle Google GenAI exceptions
     try:
@@ -30,20 +74,10 @@ def handle_ai_exception(exc: Exception) -> HTTPException:
         from google.genai.errors import APIError as GenAIAPIError
     except ImportError:
         genai_errors = None
-        GenAIAPIError = type(None)  # type: ignore
+        GenAIAPIError = None
 
-    logger.error(
-    "Exception diagnostic: type=%r, module=%r, "
-    "RateLimitError=%r, is_rate_limit=%r, is_api_error=%r",
-    type(exc),
-    type(exc).__module__,
-    RateLimitError,
-    isinstance(exc, RateLimitError),
-    isinstance(exc, APIError),
-    )
-    
     # Check for OpenAI exceptions
-    if isinstance(exc, RateLimitError):
+    if RateLimitError is not None and isinstance(exc, RateLimitError):
         status_code = 429
         error_code = "rate_limit_exceeded"
         retryable = True
@@ -53,50 +87,100 @@ def handle_ai_exception(exc: Exception) -> HTTPException:
             if retry_after:
                 try:
                     retry_after = int(retry_after)
-                except ValueError:
+                except (ValueError, TypeError):
                     retry_after = None
         detail = "Rate limit exceeded. Please try again later."
-    elif isinstance(exc, AuthenticationError):
+    elif AuthenticationError is not None and isinstance(exc, AuthenticationError):
         status_code = 401
         error_code = "authentication_error"
         detail = "Invalid API key or authentication failed."
-    elif isinstance(exc, PermissionDeniedError):
+    elif PermissionDeniedError is not None and isinstance(exc, PermissionDeniedError):
         status_code = 403
         error_code = "permission_denied"
         detail = "Permission denied. Check your API key permissions."
-    elif isinstance(exc, NotFoundError):
+    elif NotFoundError is not None and isinstance(exc, NotFoundError):
         status_code = 404
         error_code = "not_found"
         detail = "The requested resource was not found."
-    elif isinstance(exc, BadRequestError):
+    elif BadRequestError is not None and isinstance(exc, BadRequestError):
         status_code = 400
         error_code = "bad_request"
         detail = "Invalid request. Please check your input."
-    elif isinstance(exc, UnprocessableEntityError):
+    elif UnprocessableEntityError is not None and isinstance(exc, UnprocessableEntityError):
         status_code = 422
         error_code = "unprocessable_entity"
         detail = "The request was well-formed but was unable to be followed due to semantic errors."
-    elif isinstance(exc, InternalServerError):
+    elif InternalServerError is not None and isinstance(exc, InternalServerError):
         status_code = 500
         error_code = "internal_error"
         detail = "The AI provider encountered an internal error."
-    elif isinstance(exc, ServiceUnavailableError):
+    elif ServiceUnavailableError is not None and isinstance(exc, ServiceUnavailableError):
         status_code = 503
         error_code = "service_unavailable"
         retryable = True
         detail = "The AI provider is currently unavailable."
-    elif isinstance(exc, GatewayTimeoutError):
+    elif GatewayTimeoutError is not None and isinstance(exc, GatewayTimeoutError):
         status_code = 504
         error_code = "gateway_timeout"
         retryable = True
         detail = "The AI provider did not respond in time."
-    elif isinstance(exc, APIError):
-        # Catch-all for other API errors
-        status_code = 502
+    elif APIError is not None and isinstance(exc, APIError):
+        # Map based on status code if available
+        status_code = 502  # default
         error_code = "api_error"
         detail = f"AI provider error: {getattr(exc, 'message', str(exc))}"
+        if hasattr(exc, 'response') and exc.response is not None:
+            sc = exc.response.status_code
+            if sc == 429:
+                status_code = 429
+                error_code = "rate_limit_exceeded"
+                retryable = True
+                detail = "Rate limit exceeded. Please try again later."
+                # Try to get retry-after from headers
+                if hasattr(exc.response, 'headers'):
+                    retry_after = exc.response.headers.get('retry-after')
+                    if retry_after:
+                        try:
+                            retry_after = int(retry_after)
+                        except (ValueError, TypeError):
+                            retry_after = None
+            elif sc == 401:
+                status_code = 401
+                error_code = "authentication_error"
+                detail = "Invalid API key or authentication failed."
+            elif sc == 403:
+                status_code = 403
+                error_code = "permission_denied"
+                detail = "Permission denied. Check your API key permissions."
+            elif sc == 404:
+                status_code = 404
+                error_code = "not_found"
+                detail = "The requested resource was not found."
+            elif sc == 400:
+                status_code = 400
+                error_code = "bad_request"
+                detail = "Invalid request. Please check your input."
+            elif sc == 422:
+                status_code = 422
+                error_code = "unprocessable_entity"
+                detail = "The request was well-formed but was unable to be followed due to semantic errors."
+            elif sc == 500:
+                status_code = 500
+                error_code = "internal_error"
+                detail = "The AI provider encountered an internal error."
+            elif sc == 503:
+                status_code = 503
+                error_code = "service_unavailable"
+                retryable = True
+                detail = "The AI provider is currently unavailable."
+            elif sc == 504:
+                status_code = 504
+                error_code = "gateway_timeout"
+                retryable = True
+                detail = "The AI provider did not respond in time."
+            # else keep the default 502
     # Check for Google GenAI exceptions
-    elif genai_errors is not None and isinstance(exc, genai_errors.APIError):
+    elif genai_errors is not None and GenAIAPIError is not None and isinstance(exc, GenAIAPIError):
         # Map Google GenAI errors to our error codes
         # We'll use the error's code if available, otherwise use a generic one
         error_code = getattr(exc, 'code', 'google_api_error')
@@ -166,6 +250,10 @@ def handle_ai_exception(exc: Exception) -> HTTPException:
                 error_code = "gateway_timeout"
                 retryable = True
                 detail = "The AI provider did not respond in time."
+            elif "internal error" in msg:
+                status_code = 500
+                error_code = "internal_error"
+                detail = "The AI provider encountered an internal error."
             elif "service unavailable" in msg or "unavailable" in msg:
                 status_code = 503
                 error_code = "service_unavailable"
