@@ -2,7 +2,7 @@ import os
 from typing import Optional
 
 from app.ai.google import GoogleProvider
-from app.ai.groq import GroqProvider
+from app.ai.groq import GroqProvider, GROQ_BASE_URL
 from app.ai.kilo import KiloProvider
 from app.ai.ollama import OllamaProvider
 from app.ai.openai import OpenAIProvider
@@ -249,6 +249,49 @@ def _create_ai_provider_from_env(prefix: str = "", timeout: Optional[float] = No
             max_tokens=max_tokens
         )
 
+    if provider_name == "groq":
+        if prefix:
+            api_key = os.environ.get(f"{env_prefix}_GROQ_API_KEY")
+            # Fall back to common GROQ_API_KEY if task-specific one is not set
+            if not api_key:
+                api_key = os.environ.get("GROQ_API_KEY")
+            base_url = os.environ.get(f"{env_prefix}_GROQ_BASE_URL", GROQ_BASE_URL)
+            # Fall back to common GROQ_BASE_URL if task-specific one is not set
+            model = os.environ.get(f"{env_prefix}_GROQ_MODEL")
+            # Fall back to common GROQ_MODEL if task-specific one is not set
+            if not model:
+                model = os.environ.get("GROQ_MODEL")
+            # Final fallback to default model if still not set
+            if not model:
+                model = "openai/gpt-oss-20b"
+        else:
+            api_key = os.environ.get("GROQ_API_KEY")
+            base_url = os.environ.get("GROQ_BASE_URL", GROQ_BASE_URL)
+            model = os.environ.get("GROQ_MODEL")
+            if not model:
+                model = "openai/gpt-oss-20b"
+        
+        if not api_key:
+            raise RuntimeError("GROQ_API_KEY environment variable is not set")
+        # Model is now guaranteed to be set (default "openai/gpt-oss-20b") so no need to check
+        # For Groq, we pass timeout and max_retries to the OpenAI client
+        client_kwargs = {
+            "api_key": api_key,
+            "base_url": base_url,
+        }
+        if effective_timeout is not None:
+            client_kwargs["timeout"] = effective_timeout
+        if effective_max_retries is not None:
+            client_kwargs["max_retries"] = effective_max_retries
+        return GroqProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout=client_kwargs.get("timeout"),
+            max_retries=client_kwargs.get("max_retries"),
+            max_tokens=max_tokens
+        )
+
     raise RuntimeError(
         f"Invalid AI_PROVIDER: '{provider_name}'. "
         "Must be 'ollama', 'openai', 'kilo', 'google', or 'groq'."
@@ -281,3 +324,4 @@ def get_rfp_provider() -> AIProvider:
 def get_agent_provider() -> AIProvider:
     """Get AI provider for agent calls, checking AGENT_AI_PROVIDER first."""
     return _create_ai_provider_from_env("AGENT", timeout=_ai_timeout, max_retries=_ai_max_retries, max_tokens=_agent_ai_max_tokens)
+

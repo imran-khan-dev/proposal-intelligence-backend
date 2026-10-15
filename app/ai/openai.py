@@ -9,13 +9,10 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class OpenAIProvider(AIProvider):
-    \"\"\"AI provider backed by the OpenAI API.\"\"\"
+    """AI provider backed by the OpenAI API."""
 
-    def __init__(self, api_key: str, model: str, 
-                 timeout: Optional[float] = None, 
-                 max_retries: Optional[int] = None,
-                 max_tokens: Optional[int] = None):
-        # For OpenAI, we don't have a hardcoded timeout default, so we pass None if not set
+    def __init__(self, api_key: str, model: str, timeout: Optional[float] = None, max_retries: Optional[int] = None, max_tokens: Optional[int] = None):
+        # For OpenAI, we use the provided timeout and max_retries if set, otherwise use defaults
         client_kwargs = {
             "api_key": api_key,
         }
@@ -23,9 +20,10 @@ class OpenAIProvider(AIProvider):
             client_kwargs["timeout"] = timeout
         if max_retries is not None:
             client_kwargs["max_retries"] = max_retries
-            
         self._client = OpenAI(**client_kwargs)
         self._model = model
+        self._timeout = timeout
+        self._max_retries = max_retries
         self._max_tokens = max_tokens
 
     def generate_structured(
@@ -44,7 +42,6 @@ class OpenAIProvider(AIProvider):
         }
         if self._max_tokens is not None:
             request_kwargs["max_tokens"] = self._max_tokens
-            
         completion = self._client.beta.chat.completions.parse(**request_kwargs)
 
         result = completion.choices[0].message.parsed
@@ -66,5 +63,4 @@ class OpenAIProvider(AIProvider):
         }
         if self._max_tokens is not None:
             request_kwargs["max_tokens"] = self._max_tokens
-            
         return self._client.chat.completions.create(**request_kwargs)

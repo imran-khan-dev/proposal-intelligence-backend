@@ -9,17 +9,12 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class KiloProvider(AIProvider):
-    \"\"\"AI provider backed by the Kilo AI Gateway (OpenAI-compatible).\"\"\"
+    """AI provider backed by the Kilo AI Gateway (OpenAI-compatible)."""
 
-    def __init__(self, api_key: str, base_url: str, model: str, 
-                 timeout: Optional[float] = None, 
-                 max_retries: Optional[int] = None,
-                 max_tokens: Optional[int] = None):
-        # For Kilo, we preserve the current hardcoded timeout of 120.0 when timeout is not explicitly set via AI_TIMEOUT
+    def __init__(self, api_key: str, base_url: str, model: str, timeout: Optional[float] = None, max_retries: Optional[int] = None, max_tokens: Optional[int] = None):
         client_timeout = timeout
         if client_timeout is None:
             client_timeout = 120.0  # Preserve existing behavior
-        
         client_kwargs = {
             "api_key": api_key,
             "base_url": base_url,
@@ -27,9 +22,10 @@ class KiloProvider(AIProvider):
         }
         if max_retries is not None:
             client_kwargs["max_retries"] = max_retries
-            
         self._client = OpenAI(**client_kwargs)
         self._model = model
+        self._timeout = timeout
+        self._max_retries = max_retries
         self._max_tokens = max_tokens
 
     def generate_structured(
@@ -48,7 +44,6 @@ class KiloProvider(AIProvider):
         }
         if self._max_tokens is not None:
             request_kwargs["max_tokens"] = self._max_tokens
-            
         completion = self._client.chat.completions.create(**request_kwargs)
 
         raw = completion.choices[0].message.content
@@ -76,5 +71,4 @@ class KiloProvider(AIProvider):
         }
         if self._max_tokens is not None:
             request_kwargs["max_tokens"] = self._max_tokens
-            
         return self._client.chat.completions.create(**request_kwargs)
