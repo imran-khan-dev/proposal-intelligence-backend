@@ -32,6 +32,16 @@ def handle_ai_exception(exc: Exception) -> HTTPException:
         genai_errors = None
         GenAIAPIError = type(None)  # type: ignore
 
+    logger.error(
+    "Exception diagnostic: type=%r, module=%r, "
+    "RateLimitError=%r, is_rate_limit=%r, is_api_error=%r",
+    type(exc),
+    type(exc).__module__,
+    RateLimitError,
+    isinstance(exc, RateLimitError),
+    isinstance(exc, APIError),
+    )
+    
     # Check for OpenAI exceptions
     if isinstance(exc, RateLimitError):
         status_code = 429
