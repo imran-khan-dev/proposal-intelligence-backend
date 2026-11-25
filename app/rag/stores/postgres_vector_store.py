@@ -78,11 +78,9 @@ class PostgreSQLVectorStore(VectorStore):
     Uses the application-scoped async engine and session factory.
     Requires database to be initialized via initialize_database().
 
-    Workspace scope is determined by the ``workspace_id`` constructor argument
-    or the ``TENANT_ID`` environment variable (default: "default-workspace").
-    This is a configuration-based approach since authentication/authorization
-    is not yet implemented. All queries are scoped to the workspace so chunks
-    from one workspace cannot be returned to another.
+    Workspace scope is determined by the ``workspace_id`` constructor argument,
+    which must be a UUID.  When not provided, the server-resolved workspace ID
+    from :func:`app.core.workspace.resolve_workspace_id` is used.
     """
 
     def __init__(self, workspace_id: Optional[uuid.UUID] = None):
@@ -94,11 +92,10 @@ class PostgreSQLVectorStore(VectorStore):
         if workspace_id is None:
             workspace_id = resolve_workspace_id()
         elif isinstance(workspace_id, str):
-            # Normalize a string workspace id to a UUID for the database column.
-            try:
-                workspace_id = uuid.UUID(workspace_id)
-            except (ValueError, AttributeError):
-                workspace_id = uuid.uuid5(uuid.NAMESPACE_DNS, workspace_id)
+            raise ValueError(
+                "PostgreSQLVectorStore requires a UUID workspace_id, "
+                f"got string {workspace_id!r}"
+            )
 
         self._workspace_id: uuid.UUID = workspace_id
         self._workspace_id_str: str = str(workspace_id)

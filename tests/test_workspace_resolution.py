@@ -6,8 +6,9 @@ resolved server-side via :func:`app.core.workspace.resolve_workspace_id` and
 never trusted from client input.
 
 Workspace IDs are resolved as :class:`uuid.UUID` values (matching the
-``workspace_id`` database column type).  Valid UUID strings are used
-directly; other strings are deterministically mapped via :func:`uuid.uuid5`.
+``workspace_id`` database column type).  Explicit ``WORKSPACE_ID`` or
+``TENANT_ID`` must be valid UUIDs; invalid configuration fails early.
+When neither is configured, a fixed deterministic UUID is used.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ import asyncio
 import contextlib
 import os
 import uuid
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -70,7 +70,7 @@ class TestWorkspaceResolver:
         with self._env(WORKSPACE_ID=None, TENANT_ID=None):
             result = resolve_workspace_id()
         assert isinstance(result, uuid.UUID)
-        assert result == uuid.uuid5(uuid.NAMESPACE_DNS, "default-workspace")
+        assert result == uuid.UUID("550e8400-e29b-41d4-a716-446655440000")
 
     def test_from_workspace_id_env(self):
         with self._env(WORKSPACE_ID="550e8400-e29b-41d4-a716-446655440009"):
@@ -79,24 +79,28 @@ class TestWorkspaceResolver:
         assert result == uuid.UUID("550e8400-e29b-41d4-a716-446655440009")
 
     def test_from_tenant_id_env_fallback(self):
-        with self._env(WORKSPACE_ID=None, TENANT_ID="legacy-tenant"):
+        with self._env(WORKSPACE_ID=None, TENANT_ID="550e8400-e29b-41d4-a716-446655440003"):
             result = resolve_workspace_id()
         assert isinstance(result, uuid.UUID)
-        assert result == uuid.uuid5(uuid.NAMESPACE_DNS, "legacy-tenant")
+        assert result == uuid.UUID("550e8400-e29b-41d4-a716-446655440003")
 
     def test_workspace_id_takes_precedence_over_tenant_id(self):
         with self._env(
             WORKSPACE_ID="550e8400-e29b-41d4-a716-446655440009",
-            TENANT_ID="legacy-tenant",
+            TENANT_ID="550e8400-e29b-41d4-a716-446655440003",
         ):
             result = resolve_workspace_id()
         assert result == uuid.UUID("550e8400-e29b-41d4-a716-446655440009")
 
-    def test_non_uuid_string_mapped_deterministically(self):
-        with self._env(WORKSPACE_ID="my-workspace"):
-            result = resolve_workspace_id()
-        assert isinstance(result, uuid.UUID)
-        assert result == uuid.uuid5(uuid.NAMESPACE_DNS, "my-workspace")
+    def test_invalid_workspace_id_raises(self):
+        with self._env(WORKSPACE_ID="not-a-uuid"):
+            with pytest.raises(ValueError, match="must be a valid UUID"):
+                resolve_workspace_id()
+
+    def test_invalid_tenant_id_raises(self):
+        with self._env(WORKSPACE_ID=None, TENANT_ID="not-a-uuid"):
+            with pytest.raises(ValueError, match="must be a valid UUID"):
+                resolve_workspace_id()
 
     def test_workspace_id_str_returns_string(self):
         result = workspace_id_str(WS_A)
@@ -250,7 +254,7 @@ class TestRouteIgnoresClientWorkspaceId:
 
         import main
 
-        os.environ["WORKSPACE_ID"] = "550e8400-e29b-41d4-a716-446655440009"
+        os.environ["WORKSPACE_ID"] = str(WS_A)
         try:
             with patch(
                 "app.modules.documents.controller._resolve_store_and_embedder",
@@ -268,8 +272,6 @@ class TestRouteIgnoresClientWorkspaceId:
                     )
             assert r.status_code == 200, r.json()
             # Response reflects the server-resolved workspace, not "evil".
-            assert r.json()["workspace_id"] == str(
-                uuid.UUID("550e8400-e29b-41d4-a716-446655440009")
-            )
+            assert r.json()["workspace_id"] == str(WS_A)
         finally:
             os.environ.pop("WORKSPACE_ID", None)
