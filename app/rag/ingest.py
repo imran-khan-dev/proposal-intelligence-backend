@@ -387,8 +387,11 @@ def ingest_document(
     """
     # Handle empty/whitespace text - remove existing chunks and return 0
     if not text or not text.strip():
+        delete_filter = {"doc_id": doc_id}
+        if workspace_id is not None:
+            delete_filter["workspace_id"] = workspace_id
         if store.count() > 0:
-            store.delete_by_metadata({"doc_id": doc_id})
+            store.delete_by_metadata(delete_filter)
         return 0
 
     # Build page-aware chunks with absolute offsets when pages are provided.
@@ -412,8 +415,11 @@ def ingest_document(
         )
 
     if not text_chunks:
+        delete_filter = {"doc_id": doc_id}
+        if workspace_id is not None:
+            delete_filter["workspace_id"] = workspace_id
         if store.count() > 0:
-            store.delete_by_metadata({"doc_id": doc_id})
+            store.delete_by_metadata(delete_filter)
         return 0
 
     chunk_texts = [chunk.text for chunk in text_chunks]
@@ -502,8 +508,11 @@ async def async_ingest_document(
     """
     # Handle empty/whitespace text - remove existing chunks and return 0
     if not text or not text.strip():
+        delete_filter = {"doc_id": doc_id}
+        if workspace_id is not None:
+            delete_filter["workspace_id"] = workspace_id
         if await store.async_count() > 0:
-            await store.async_delete_by_metadata({"doc_id": doc_id})
+            await store.async_delete_by_metadata(delete_filter)
         return 0
 
     # Build page-aware chunks with absolute offsets when pages are provided.
@@ -526,8 +535,11 @@ async def async_ingest_document(
         )
 
     if not text_chunks:
+        delete_filter = {"doc_id": doc_id}
+        if workspace_id is not None:
+            delete_filter["workspace_id"] = workspace_id
         if await store.async_count() > 0:
-            await store.async_delete_by_metadata({"doc_id": doc_id})
+            await store.async_delete_by_metadata(delete_filter)
         return 0
 
     chunk_texts = [chunk.text for chunk in text_chunks]

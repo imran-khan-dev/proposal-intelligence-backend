@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import HTTPException, UploadFile
 
 from app.ai.embedding_factory import get_embedding_provider
+from app.core.workspace import resolve_workspace_id
 from app.modules.documents.schema import (
     ChunkListResponse,
     DocumentIngestResponse,
@@ -27,18 +28,30 @@ from app.rag.stores.postgres_vector_store import PostgreSQLVectorStore
 logger = logging.getLogger(__name__)
 
 
-def _resolve_store_and_embedder(workspace_id: Optional[str]):
+def _resolve_workspace_id(workspace_id: Optional[str]) -> str:
+    """Return the workspace to use for this request.
+
+    The route layer resolves the workspace server-side and always passes a
+    value.  This fallback keeps direct controller calls testable without
+    ever trusting client input.
+    """
+    if workspace_id:
+        return workspace_id
+    return resolve_workspace_id()
+
+
+def _resolve_store_and_embedder(workspace_id: str):
     """Resolve the embedding provider and a workspace-scoped vector store.
 
-    When a ``workspace_id`` is supplied and the configured store is a
-    PostgreSQL store, a new store instance scoped to that workspace is created
-    so queries cannot leak across workspaces. Otherwise the application-wide
-    singleton store is used (workspace filtering is then applied via chunk
-    metadata for in-memory / persistent stores).
+    When the configured store is PostgreSQL, a new store instance scoped to
+    ``workspace_id`` is created so queries cannot leak across workspaces.
+    Otherwise the application-wide singleton store is used (workspace
+    filtering is then applied via chunk metadata for in-memory / persistent
+    stores).
     """
     embedder = get_embedding_provider()
     store = get_vector_store()
-    if workspace_id is not None and isinstance(store, PostgreSQLVectorStore):
+    if isinstance(store, PostgreSQLVectorStore):
         store = PostgreSQLVectorStore(workspace_id=workspace_id)
     return store, embedder
 
@@ -50,8 +63,11 @@ async def ingest_document_controller(
 
     Supports ``.pdf``, ``.txt`` and ``.md``. PDFs are extracted page by page
     with absolute character offsets so every stored chunk carries a traceable
-    source reference.
+    source reference.  ``workspace_id`` is server-resolved; callers cannot
+    select another workspace.
     """
+    workspace_id = _resolve_workspace_id(workspace_id)
+
     # --- Validate file type ---
     suffix = Path(file.filename).suffix.lower() if file.filename else ""
     if suffix not in SUPPORTED_EXTENSIONS:
@@ -87,7 +103,7 @@ async def ingest_document_controller(
     doc_id = derive_doc_id(file.filename)
     source_filename = file.filename or ""
 
-    # --- Resolve singletons (tenant-scoped store + embedder) ---
+    # --- Resolve singletons (workspace-scoped store + embedder) ---
     store, embedder = _resolve_store_and_embedder(workspace_id)
 
     pages = None
@@ -167,7 +183,8 @@ async def ingest_document_controller(
 async def list_documents_controller(
     workspace_id: Optional[str] = None,
 ) -> DocumentListResponse:
-    """List ingested documents, optionally scoped to a workspace."""
+    """List ingested documents in the resolved workspace."""
+    workspace_id = _resolve_workspace_id(workspace_id)
     store = get_vector_store()
 
     try:
@@ -191,7 +208,8 @@ async def list_documents_controller(
 async def get_document_controller(
     doc_id: str, workspace_id: Optional[str] = None
 ):
-    """Get metadata for a single ingested document."""
+    """Get metadata for a single ingested document in the resolved workspace."""
+    workspace_id = _resolve_workspace_id(workspace_id)
     store = get_vector_store()
     try:
         document = await async_get_document(
@@ -222,6 +240,7 @@ async def get_document_chunks_controller(
     doc_id: str, workspace_id: Optional[str] = None
 ) -> ChunkListResponse:
     """Get all chunks for a document with their source references."""
+    workspace_id = _resolve_workspace_id(workspace_id)
     store = get_vector_store()
     try:
         chunks = await async_get_document_chunks(
