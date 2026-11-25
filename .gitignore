@@ -71,7 +71,7 @@ vector_store/
 data/
 
 # Model downloads and local ML caches
-models/
+/models/
 .cache/
 huggingface/
 sentence_transformers/
