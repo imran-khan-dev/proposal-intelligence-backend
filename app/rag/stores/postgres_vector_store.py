@@ -1,7 +1,6 @@
 """PostgreSQL + pgvector vector store implementation."""
 
 import asyncio
-import os
 import uuid
 from typing import Any, List, Optional
 
@@ -10,6 +9,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 from app.core.database import get_async_session_factory, is_database_initialized
+from app.core.workspace import resolve_workspace_id
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.tenant import Tenant
@@ -85,18 +85,23 @@ class PostgreSQLVectorStore(VectorStore):
     from one workspace cannot be returned to another.
     """
 
-    def __init__(self, workspace_id: Optional[str] = None):
+    def __init__(self, workspace_id: Optional[uuid.UUID] = None):
         if not is_database_initialized():
             raise RuntimeError(
                 "Database not initialized. Call initialize_database() at startup."
             )
 
-        workspace_id = workspace_id or os.environ.get(
-            "TENANT_ID", "default-workspace"
-        )
-        self._workspace_id_str = str(workspace_id)
-        # Generate a deterministic UUID from the workspace string
-        self._workspace_id = uuid.uuid5(uuid.NAMESPACE_DNS, self._workspace_id_str)
+        if workspace_id is None:
+            workspace_id = resolve_workspace_id()
+        elif isinstance(workspace_id, str):
+            # Normalize a string workspace id to a UUID for the database column.
+            try:
+                workspace_id = uuid.UUID(workspace_id)
+            except (ValueError, AttributeError):
+                workspace_id = uuid.uuid5(uuid.NAMESPACE_DNS, workspace_id)
+
+        self._workspace_id: uuid.UUID = workspace_id
+        self._workspace_id_str: str = str(workspace_id)
         self._dimension = EXPECTED_DIMENSION
         self._session_factory = get_async_session_factory()
 

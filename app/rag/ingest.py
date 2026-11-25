@@ -339,7 +339,7 @@ def _build_record_metadata(
     if section_path is not None:
         metadata["section_path"] = section_path
     if workspace_id is not None:
-        metadata["workspace_id"] = workspace_id
+        metadata["workspace_id"] = str(workspace_id)
     if extra:
         metadata.update(extra)
     return metadata

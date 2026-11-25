@@ -6,11 +6,17 @@ documents, and workspace scoping at the controller boundary.
 """
 
 import asyncio
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException, UploadFile
+
+TEST_WS = uuid.UUID("550e8400-e29b-41d4-a716-446655440001")
+TEST_WS_STR = str(TEST_WS)
+TEST_WS_B = uuid.UUID("550e8400-e29b-41d4-a716-446655440002")
+TEST_WS_B_STR = str(TEST_WS_B)
 
 from app.modules.documents.controller import (
     get_document_chunks_controller,
@@ -46,17 +52,17 @@ class TestIngestDocumentController:
             new=AsyncMock(return_value=3),
         ) as ingest_mock:
             resp = self._run(
-                ingest_document_controller(file, workspace_id="ws-1")
+                ingest_document_controller(file, workspace_id=TEST_WS_STR)
             )
 
         assert resp.doc_id == "notes"
         assert resp.chunk_count == 3
-        assert resp.workspace_id == "ws-1"
+        assert resp.workspace_id == TEST_WS_STR
         kwargs = ingest_mock.call_args.kwargs
         assert kwargs["text"] == "hello notes content"
         assert kwargs["doc_id"] == "notes"
         assert kwargs["source_filename"] == "notes.txt"
-        assert kwargs["workspace_id"] == "ws-1"
+        assert kwargs["workspace_id"] == TEST_WS_STR
         assert kwargs["pages"] is None
 
     def test_ingest_md(self):
@@ -100,10 +106,10 @@ class TestIngestDocumentController:
             "app.modules.documents.controller.async_ingest_document_from_text",
             new=AsyncMock(return_value=2),
         ) as ingest_mock:
-            resp = self._run(ingest_document_controller(file, workspace_id="ws-2"))
+            resp = self._run(ingest_document_controller(file, workspace_id=TEST_WS_B_STR))
 
         assert resp.doc_id == "r"
-        assert resp.workspace_id == "ws-2"
+        assert resp.workspace_id == TEST_WS_B_STR
         kwargs = ingest_mock.call_args.kwargs
         assert kwargs["pages"] is not None
         assert len(kwargs["pages"]) == 2
@@ -155,7 +161,7 @@ class TestListDocumentsController:
     def test_list_documents(self):
         store = MagicMock()
         expected = [
-            {"doc_id": "doc-a", "source_filename": "a.txt", "chunk_count": 2, "workspace_id": "ws-1", "pages": [1]}
+            {"doc_id": "doc-a", "source_filename": "a.txt", "chunk_count": 2, "workspace_id": TEST_WS_STR, "pages": [1]}
         ]
         with patch(
             "app.modules.documents.controller.get_vector_store", return_value=store
@@ -163,7 +169,7 @@ class TestListDocumentsController:
             "app.modules.documents.controller.async_list_documents",
             new=AsyncMock(return_value=expected),
         ):
-            resp = asyncio.run(list_documents_controller(workspace_id="ws-1"))
+            resp = asyncio.run(list_documents_controller(workspace_id=TEST_WS_STR))
 
         assert len(resp.documents) == 1
         assert resp.documents[0].doc_id == "doc-a"
@@ -172,14 +178,14 @@ class TestListDocumentsController:
 class TestGetDocumentController:
     def test_get_document_found(self):
         store = MagicMock()
-        expected = {"doc_id": "doc-a", "source_filename": "a.txt", "chunk_count": 2, "workspace_id": "ws-1"}
+        expected = {"doc_id": "doc-a", "source_filename": "a.txt", "chunk_count": 2, "workspace_id": TEST_WS_STR}
         with patch(
             "app.modules.documents.controller.get_vector_store", return_value=store
         ), patch(
             "app.modules.documents.controller.async_get_document",
             new=AsyncMock(return_value=expected),
         ):
-            doc = asyncio.run(get_document_controller("doc-a", workspace_id="ws-1"))
+            doc = asyncio.run(get_document_controller("doc-a", workspace_id=TEST_WS_STR))
         assert doc["doc_id"] == "doc-a"
 
     def test_get_document_not_found(self):
@@ -209,7 +215,7 @@ class TestGetDocumentChunksController:
                 "character_start": 0,
                 "character_end": 7,
                 "source_filename": "a.txt",
-                "workspace_id": "ws-1",
+                "workspace_id": TEST_WS_STR,
                 "metadata": {},
             }
         ]

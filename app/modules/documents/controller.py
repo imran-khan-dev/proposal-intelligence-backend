@@ -1,13 +1,14 @@
 """HTTP controller for document ingestion and queries."""
 
 import logging
+import uuid
 from pathlib import Path
 from typing import Optional
 
 from fastapi import HTTPException, UploadFile
 
 from app.ai.embedding_factory import get_embedding_provider
-from app.core.workspace import resolve_workspace_id
+from app.core.workspace import resolve_workspace_id, workspace_id_str
 from app.modules.documents.schema import (
     ChunkListResponse,
     DocumentIngestResponse,
@@ -28,7 +29,7 @@ from app.rag.stores.postgres_vector_store import PostgreSQLVectorStore
 logger = logging.getLogger(__name__)
 
 
-def _resolve_workspace_id(workspace_id: Optional[str]) -> str:
+def _resolve_workspace_id(workspace_id: Optional[str] = None) -> uuid.UUID:
     """Return the workspace to use for this request.
 
     The route layer resolves the workspace server-side and always passes a
@@ -36,11 +37,16 @@ def _resolve_workspace_id(workspace_id: Optional[str]) -> str:
     ever trusting client input.
     """
     if workspace_id:
-        return workspace_id
+        if isinstance(workspace_id, uuid.UUID):
+            return workspace_id
+        try:
+            return uuid.UUID(workspace_id)
+        except (ValueError, AttributeError):
+            return resolve_workspace_id()
     return resolve_workspace_id()
 
 
-def _resolve_store_and_embedder(workspace_id: str):
+def _resolve_store_and_embedder(workspace_id: uuid.UUID):
     """Resolve the embedding provider and a workspace-scoped vector store.
 
     When the configured store is PostgreSQL, a new store instance scoped to
@@ -66,8 +72,6 @@ async def ingest_document_controller(
     source reference.  ``workspace_id`` is server-resolved; callers cannot
     select another workspace.
     """
-    workspace_id = _resolve_workspace_id(workspace_id)
-
     # --- Validate file type ---
     suffix = Path(file.filename).suffix.lower() if file.filename else ""
     if suffix not in SUPPORTED_EXTENSIONS:
@@ -104,7 +108,11 @@ async def ingest_document_controller(
     source_filename = file.filename or ""
 
     # --- Resolve singletons (workspace-scoped store + embedder) ---
-    store, embedder = _resolve_store_and_embedder(workspace_id)
+    # workspace_id is server-resolved as a UUID; the string form is used for
+    # chunk metadata while the UUID form is used for database column queries.
+    ws_uuid = _resolve_workspace_id(workspace_id)
+    ws_str = workspace_id_str(ws_uuid)
+    store, embedder = _resolve_store_and_embedder(ws_uuid)
 
     pages = None
     text = ""
@@ -151,7 +159,7 @@ async def ingest_document_controller(
             metadata=metadata,
             pages=pages,
             source_filename=source_filename,
-            workspace_id=workspace_id,
+            workspace_id=ws_str,
         )
     except ValueError as exc:
         logger.warning("Document ingestion validation failed: %s", exc)
@@ -176,7 +184,7 @@ async def ingest_document_controller(
         doc_id=doc_id,
         chunk_count=chunk_count,
         message=f"Successfully ingested '{doc_id}' ({chunk_count} chunks)",
-        workspace_id=workspace_id,
+        workspace_id=ws_str,
     )
 
 
@@ -184,11 +192,12 @@ async def list_documents_controller(
     workspace_id: Optional[str] = None,
 ) -> DocumentListResponse:
     """List ingested documents in the resolved workspace."""
-    workspace_id = _resolve_workspace_id(workspace_id)
+    ws_uuid = _resolve_workspace_id(workspace_id)
+    ws_str = workspace_id_str(ws_uuid)
     store = get_vector_store()
 
     try:
-        documents = await async_list_documents(store, workspace_id=workspace_id)
+        documents = await async_list_documents(store, workspace_id=ws_str)
     except NotImplementedError as exc:
         logger.warning("Store does not support document listing: %s", exc)
         raise HTTPException(
@@ -209,11 +218,12 @@ async def get_document_controller(
     doc_id: str, workspace_id: Optional[str] = None
 ):
     """Get metadata for a single ingested document in the resolved workspace."""
-    workspace_id = _resolve_workspace_id(workspace_id)
+    ws_uuid = _resolve_workspace_id(workspace_id)
+    ws_str = workspace_id_str(ws_uuid)
     store = get_vector_store()
     try:
         document = await async_get_document(
-            store, doc_id, workspace_id=workspace_id
+            store, doc_id, workspace_id=ws_str
         )
     except NotImplementedError as exc:
         logger.warning("Store does not support document lookup: %s", exc)
@@ -240,11 +250,12 @@ async def get_document_chunks_controller(
     doc_id: str, workspace_id: Optional[str] = None
 ) -> ChunkListResponse:
     """Get all chunks for a document with their source references."""
-    workspace_id = _resolve_workspace_id(workspace_id)
+    ws_uuid = _resolve_workspace_id(workspace_id)
+    ws_str = workspace_id_str(ws_uuid)
     store = get_vector_store()
     try:
         chunks = await async_get_document_chunks(
-            store, doc_id, workspace_id=workspace_id
+            store, doc_id, workspace_id=ws_str
         )
     except NotImplementedError as exc:
         logger.warning("Store does not support chunk lookup: %s", exc)

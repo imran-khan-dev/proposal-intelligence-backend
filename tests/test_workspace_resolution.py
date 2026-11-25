@@ -4,18 +4,24 @@ These tests prove that a client cannot access another workspace's documents
 or chunks by supplying a different ``workspace_id``.  Workspace identity is
 resolved server-side via :func:`app.core.workspace.resolve_workspace_id` and
 never trusted from client input.
+
+Workspace IDs are resolved as :class:`uuid.UUID` values (matching the
+``workspace_id`` database column type).  Valid UUID strings are used
+directly; other strings are deterministically mapped via :func:`uuid.uuid5`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.workspace import resolve_workspace_id
+from app.core.workspace import resolve_workspace_id, workspace_id_str
 from app.modules.documents.controller import (
     get_document_chunks_controller,
     get_document_controller,
@@ -24,6 +30,9 @@ from app.modules.documents.controller import (
 )
 from app.modules.documents.schema import ChunkListResponse
 from app.rag.store import InMemoryVectorStore
+
+WS_A = uuid.UUID("550e8400-e29b-41d4-a716-446655440001")
+WS_B = uuid.UUID("550e8400-e29b-41d4-a716-446655440002")
 
 
 class FakeEmbedder:
@@ -38,34 +47,61 @@ class FakeEmbedder:
 # ---------------------------------------------------------------------------
 
 class TestWorkspaceResolver:
+    @contextlib.contextmanager
+    def _env(self, **kwargs):
+        """Context manager that sets environment variables and restores them."""
+        orig = {}
+        for key, value in kwargs.items():
+            orig[key] = os.environ.get(key)
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        try:
+            yield
+        finally:
+            for key, value in orig.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
     def test_default_when_no_env(self):
-        for key in ("WORKSPACE_ID", "TENANT_ID"):
-            os.environ.pop(key, None)
-        assert resolve_workspace_id() == "default-workspace"
+        with self._env(WORKSPACE_ID=None, TENANT_ID=None):
+            result = resolve_workspace_id()
+        assert isinstance(result, uuid.UUID)
+        assert result == uuid.uuid5(uuid.NAMESPACE_DNS, "default-workspace")
 
     def test_from_workspace_id_env(self):
-        os.environ["WORKSPACE_ID"] = "ws-custom"
-        try:
-            assert resolve_workspace_id() == "ws-custom"
-        finally:
-            os.environ.pop("WORKSPACE_ID", None)
+        with self._env(WORKSPACE_ID="550e8400-e29b-41d4-a716-446655440009"):
+            result = resolve_workspace_id()
+        assert isinstance(result, uuid.UUID)
+        assert result == uuid.UUID("550e8400-e29b-41d4-a716-446655440009")
 
     def test_from_tenant_id_env_fallback(self):
-        os.environ.pop("WORKSPACE_ID", None)
-        os.environ["TENANT_ID"] = "legacy-tenant"
-        try:
-            assert resolve_workspace_id() == "legacy-tenant"
-        finally:
-            os.environ.pop("TENANT_ID", None)
+        with self._env(WORKSPACE_ID=None, TENANT_ID="legacy-tenant"):
+            result = resolve_workspace_id()
+        assert isinstance(result, uuid.UUID)
+        assert result == uuid.uuid5(uuid.NAMESPACE_DNS, "legacy-tenant")
 
     def test_workspace_id_takes_precedence_over_tenant_id(self):
-        os.environ["WORKSPACE_ID"] = "ws-primary"
-        os.environ["TENANT_ID"] = "legacy-tenant"
-        try:
-            assert resolve_workspace_id() == "ws-primary"
-        finally:
-            os.environ.pop("WORKSPACE_ID", None)
-            os.environ.pop("TENANT_ID", None)
+        with self._env(
+            WORKSPACE_ID="550e8400-e29b-41d4-a716-446655440009",
+            TENANT_ID="legacy-tenant",
+        ):
+            result = resolve_workspace_id()
+        assert result == uuid.UUID("550e8400-e29b-41d4-a716-446655440009")
+
+    def test_non_uuid_string_mapped_deterministically(self):
+        with self._env(WORKSPACE_ID="my-workspace"):
+            result = resolve_workspace_id()
+        assert isinstance(result, uuid.UUID)
+        assert result == uuid.uuid5(uuid.NAMESPACE_DNS, "my-workspace")
+
+    def test_workspace_id_str_returns_string(self):
+        result = workspace_id_str(WS_A)
+        assert result == "550e8400-e29b-41d4-a716-446655440001"
+        assert isinstance(result, str)
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +122,7 @@ class TestControllerWorkspaceIsolation:
 
     def test_same_doc_id_isolated_across_workspaces(self):
         """Re-ingesting the same doc_id in another workspace must not delete
-        the first workspace's chunk (empty-text and normal paths)."""
+        the first workspace's chunk."""
         store = InMemoryVectorStore()
         embedder = FakeEmbedder()
 
@@ -100,27 +136,27 @@ class TestControllerWorkspaceIsolation:
             self._run(
                 ingest_document_controller(
                     _make_upload_file("shared.txt", b"ws-a content"),
-                    workspace_id="ws-a",
+                    workspace_id=str(WS_A),
                 )
             )
             self._run(
                 ingest_document_controller(
                     _make_upload_file("shared.txt", b"ws-b content"),
-                    workspace_id="ws-b",
+                    workspace_id=str(WS_B),
                 )
             )
 
             chunks_a = asyncio.run(
-                get_document_chunks_controller("shared", workspace_id="ws-a")
+                get_document_chunks_controller("shared", workspace_id=str(WS_A))
             )
             chunks_b = asyncio.run(
-                get_document_chunks_controller("shared", workspace_id="ws-b")
+                get_document_chunks_controller("shared", workspace_id=str(WS_B))
             )
 
         assert len(chunks_a.chunks) == 1
-        assert chunks_a.chunks[0].workspace_id == "ws-a"
+        assert chunks_a.chunks[0].workspace_id == str(WS_A)
         assert len(chunks_b.chunks) == 1
-        assert chunks_b.chunks[0].workspace_id == "ws-b"
+        assert chunks_b.chunks[0].workspace_id == str(WS_B)
 
     def test_list_respects_workspace(self):
         store = InMemoryVectorStore()
@@ -136,18 +172,18 @@ class TestControllerWorkspaceIsolation:
             self._run(
                 ingest_document_controller(
                     _make_upload_file("a.txt", b"ws-a doc"),
-                    workspace_id="ws-a",
+                    workspace_id=str(WS_A),
                 )
             )
             self._run(
                 ingest_document_controller(
                     _make_upload_file("b.txt", b"ws-b doc"),
-                    workspace_id="ws-b",
+                    workspace_id=str(WS_B),
                 )
             )
 
-            docs_a = asyncio.run(list_documents_controller(workspace_id="ws-a"))
-            docs_b = asyncio.run(list_documents_controller(workspace_id="ws-b"))
+            docs_a = asyncio.run(list_documents_controller(workspace_id=str(WS_A)))
+            docs_b = asyncio.run(list_documents_controller(workspace_id=str(WS_B)))
 
         assert [d.doc_id for d in docs_a.documents] == ["a"]
         assert [d.doc_id for d in docs_b.documents] == ["b"]
@@ -159,11 +195,14 @@ class TestControllerWorkspaceIsolation:
         with patch(
             "app.modules.documents.controller._resolve_store_and_embedder",
             return_value=(store, embedder),
+        ), patch(
+            "app.modules.documents.controller.get_vector_store",
+            return_value=store,
         ):
             self._run(
                 ingest_document_controller(
                     _make_upload_file("only.txt", b"ws-a only"),
-                    workspace_id="ws-a",
+                    workspace_id=str(WS_A),
                 )
             )
 
@@ -176,7 +215,7 @@ class TestControllerWorkspaceIsolation:
 
             with pytest.raises(HTTPException) as exc_info:
                 asyncio.run(
-                    get_document_controller("only", workspace_id="ws-b")
+                    get_document_controller("only", workspace_id=str(WS_B))
                 )
             assert exc_info.value.status_code == 404
 
@@ -211,7 +250,7 @@ class TestRouteIgnoresClientWorkspaceId:
 
         import main
 
-        os.environ["WORKSPACE_ID"] = "server-ws"
+        os.environ["WORKSPACE_ID"] = "550e8400-e29b-41d4-a716-446655440009"
         try:
             with patch(
                 "app.modules.documents.controller._resolve_store_and_embedder",
@@ -229,6 +268,8 @@ class TestRouteIgnoresClientWorkspaceId:
                     )
             assert r.status_code == 200, r.json()
             # Response reflects the server-resolved workspace, not "evil".
-            assert r.json()["workspace_id"] == "server-ws"
+            assert r.json()["workspace_id"] == str(
+                uuid.UUID("550e8400-e29b-41d4-a716-446655440009")
+            )
         finally:
             os.environ.pop("WORKSPACE_ID", None)
