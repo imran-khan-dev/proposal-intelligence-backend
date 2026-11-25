@@ -1,0 +1,4 @@
+Company Security Policy
+-----------------------
+All vendors must comply with ISO 27001.
+Evidence of SOC 2 Type II attestation is required.

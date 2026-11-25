@@ -32,3 +32,4 @@ def health_check():
     return {"status": "ok"}
 
 # uvicorn main:app --reload
+#  python -m uvicorn main:app --reload

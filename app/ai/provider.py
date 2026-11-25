@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Type, TypeVar, Any
+from typing import Any, Type, TypeVar
 
 from pydantic import BaseModel
 
@@ -16,8 +16,8 @@ class AIProvider(ABC):
         user_text: str,
         response_model: Type[T],
     ) -> T:
-        """Generate a response validated against a Pydantic model."""
-        ...
+        """Generate a structured response from the AI provider."""
+        pass
 
     @abstractmethod
     def chat_with_tools(
@@ -25,10 +25,5 @@ class AIProvider(ABC):
         messages: list[dict],
         tools: list[dict],
     ) -> Any:
-        """Send a chat completion request with tool definitions.
-
-        Returns the raw completion object from the underlying SDK.
-        The caller is responsible for inspecting tool_calls and
-        executing them, then sending results back via another call.
-        """
-        ...
+        """Chat with the AI provider using tools."""
+        pass

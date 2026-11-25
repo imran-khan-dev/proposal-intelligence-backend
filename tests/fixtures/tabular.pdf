@@ -1,0 +1,102 @@
+%PDF-1.4
+% test fixture
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R 10 0 R] /Count 4 >>
+endobj
+5 0 obj
+<< /Length 104>>
+stream
+BT
+/F1 12 Tf
+50 740 Td
+(Requirement ID) Tj
+0 -14 Td
+(Description) Tj
+0 -14 Td
+(Priority) Tj
+0 -14 Td
+ET
+endstream
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+7 0 obj
+<< /Length 114>>
+stream
+BT
+/F1 12 Tf
+50 740 Td
+(REQ-001) Tj
+0 -14 Td
+(Support SAML 2.0 single sign-on.) Tj
+0 -14 Td
+(High) Tj
+0 -14 Td
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 7 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+9 0 obj
+<< /Length 114>>
+stream
+BT
+/F1 12 Tf
+50 740 Td
+(REQ-002) Tj
+0 -14 Td
+(Export compliance matrix to CSV.) Tj
+0 -14 Td
+(High) Tj
+0 -14 Td
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 9 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+11 0 obj
+<< /Length 109>>
+stream
+BT
+/F1 12 Tf
+50 740 Td
+(REQ-003) Tj
+0 -14 Td
+(Provide 99.9% uptime SLA.) Tj
+0 -14 Td
+(Medium) Tj
+0 -14 Td
+ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 11 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+xref
+0 12
+0000000000 65535 f 
+0000000094 00000 n 
+0000000143 00000 n 
+0000000024 00000 n 
+0000000372 00000 n 
+0000000219 00000 n 
+0000000661 00000 n 
+0000000498 00000 n 
+0000000950 00000 n 
+0000000787 00000 n 
+0000001235 00000 n 
+0000001076 00000 n 
+trailer
+<< /Size 12 /Root 1 0 R >>
+startxref
+1363
+%%EOF
