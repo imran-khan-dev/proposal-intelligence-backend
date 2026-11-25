@@ -1,0 +1,1 @@
+"""Requirements module: structured RFP parsing and requirement extraction."""

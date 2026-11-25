@@ -3,6 +3,7 @@ from fastapi import APIRouter
 
 from app.modules.agent.route import router as AgentRoutes
 from app.modules.documents.route import router as DocumentsRoutes
+from app.modules.requirements.route import router as RequirementsRoutes
 from app.modules.rfp_analyze.route import router as RfpAnalyzeRoutes
 
 
@@ -20,6 +21,10 @@ module_routes = [
     {
         "path": "/rfp",
         "route": RfpAnalyzeRoutes,
+    },
+    {
+        "path": "/requirements",
+        "route": RequirementsRoutes,
     },
 ]
 
