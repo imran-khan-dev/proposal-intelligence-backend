@@ -148,6 +148,76 @@ class VectorStore(ABC):
         ...
 
 
+def _document_summaries_from_records(
+    records: List[VectorRecord], workspace_id: Optional[str] = None
+) -> List[dict]:
+    """Aggregate VectorRecords into per-document summaries.
+
+    Groups records by ``doc_id`` and optionally filters by workspace id stored
+    in chunk metadata.
+    """
+    from collections import OrderedDict
+
+    docs: "OrderedDict[str, dict]" = OrderedDict()
+    for record in records:
+        doc_id = record.metadata.get("doc_id")
+        if doc_id is None:
+            continue
+        if workspace_id is not None and record.metadata.get("workspace_id") != workspace_id:
+            continue
+        if doc_id not in docs:
+            docs[doc_id] = {
+                "doc_id": doc_id,
+                "source_filename": record.metadata.get("source_filename"),
+                "title": record.metadata.get("title")
+                or record.metadata.get("source_filename"),
+                "chunk_count": 0,
+                "workspace_id": record.metadata.get("workspace_id"),
+                "pages": set(),
+            }
+        entry = docs[doc_id]
+        entry["chunk_count"] += 1
+        page_number = record.metadata.get("page_number")
+        if page_number is not None:
+            entry["pages"].add(page_number)
+
+    result: List[dict] = []
+    for entry in docs.values():
+        entry["pages"] = sorted(entry["pages"])
+        result.append(entry)
+    return result
+
+
+def _chunk_records_to_dicts(
+    records: List[VectorRecord], workspace_id: Optional[str] = None
+) -> List[dict]:
+    """Convert VectorRecords to source-reference chunk dicts.
+
+    Optionally filters by workspace id stored in chunk metadata.
+    """
+    result: List[dict] = []
+    for record in records:
+        if workspace_id is not None and record.metadata.get("workspace_id") != workspace_id:
+            continue
+        result.append(
+            {
+                "chunk_id": record.id,
+                "document_id": record.metadata.get("doc_id"),
+                "doc_id": record.metadata.get("doc_id"),
+                "chunk_index": record.metadata.get("chunk_index"),
+                "text": record.text,
+                "page_number": record.metadata.get("page_number"),
+                "character_start": record.metadata.get("character_start"),
+                "character_end": record.metadata.get("character_end"),
+                "section_path": record.metadata.get("section_path"),
+                "source_filename": record.metadata.get("source_filename"),
+                "workspace_id": record.metadata.get("workspace_id"),
+                "metadata": record.metadata,
+            }
+        )
+    return result
+
+
 class InMemoryVectorStore(VectorStore):
     """Simple in-memory vector store using cosine similarity.
 
@@ -271,6 +341,48 @@ class InMemoryVectorStore(VectorStore):
     @property
     def dimension(self) -> Optional[int]:
         return self._dimension
+
+    # --- Document query operations (list / get / get-chunks) ---
+
+    def list_documents(self, workspace_id: Optional[str] = None) -> List[dict]:
+        return _document_summaries_from_records(self._records, workspace_id=workspace_id)
+
+    def get_document(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> Optional[dict]:
+        summaries = _document_summaries_from_records(
+            self._records, workspace_id=workspace_id
+        )
+        for summary in summaries:
+            if summary["doc_id"] == doc_id:
+                return summary
+        return None
+
+    def get_document_chunks(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> List[dict]:
+        return [
+            record
+            for record in _chunk_records_to_dicts(
+                self._records, workspace_id=workspace_id
+            )
+            if record["doc_id"] == doc_id
+        ]
+
+    async def async_list_documents(
+        self, workspace_id: Optional[str] = None
+    ) -> List[dict]:
+        return self.list_documents(workspace_id=workspace_id)
+
+    async def async_get_document(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> Optional[dict]:
+        return self.get_document(doc_id, workspace_id=workspace_id)
+
+    async def async_get_document_chunks(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> List[dict]:
+        return self.get_document_chunks(doc_id, workspace_id=workspace_id)
 
     async def async_add(self, records: List[VectorRecord]) -> None:
         """Async wrapper for add (sync implementation)."""
@@ -590,6 +702,48 @@ class PersistentVectorStore(VectorStore):
     @property
     def dimension(self) -> Optional[int]:
         return self._dimension
+
+    # --- Document query operations (list / get / get-chunks) ---
+
+    def list_documents(self, workspace_id: Optional[str] = None) -> List[dict]:
+        return _document_summaries_from_records(self._records, workspace_id=workspace_id)
+
+    def get_document(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> Optional[dict]:
+        summaries = _document_summaries_from_records(
+            self._records, workspace_id=workspace_id
+        )
+        for summary in summaries:
+            if summary["doc_id"] == doc_id:
+                return summary
+        return None
+
+    def get_document_chunks(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> List[dict]:
+        return [
+            record
+            for record in _chunk_records_to_dicts(
+                self._records, workspace_id=workspace_id
+            )
+            if record["doc_id"] == doc_id
+        ]
+
+    async def async_list_documents(
+        self, workspace_id: Optional[str] = None
+    ) -> List[dict]:
+        return self.list_documents(workspace_id=workspace_id)
+
+    async def async_get_document(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> Optional[dict]:
+        return self.get_document(doc_id, workspace_id=workspace_id)
+
+    async def async_get_document_chunks(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> List[dict]:
+        return self.get_document_chunks(doc_id, workspace_id=workspace_id)
 
     async def async_add(self, records: List[VectorRecord]) -> None:
         """Async wrapper for add (sync implementation)."""

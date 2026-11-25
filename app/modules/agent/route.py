@@ -8,7 +8,7 @@ from app.modules.agent.schema import AgentRunRequest, AgentRunResponse
 router = APIRouter(tags=["agent"])
 
 
-@router.post("/run", response_model=AgentRunResponse)
+@router.post("/", response_model=AgentRunResponse)
 async def run_agent_route(
     request: AgentRunRequest,
 ) -> AgentRunResponse:

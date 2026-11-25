@@ -1,7 +1,6 @@
 """PostgreSQL + pgvector vector store implementation."""
 
 import asyncio
-import os
 import uuid
 from typing import Any, List, Optional
 
@@ -10,6 +9,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 from app.core.database import get_async_session_factory, is_database_initialized
+from app.core.workspace import resolve_workspace_id
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.tenant import Tenant
@@ -40,53 +40,98 @@ def _run_async(coro):
     )
 
 
+def _summarize_chunks(chunks: List[DocumentChunk]) -> List[dict]:
+    """Group DocumentChunk rows into per-document summaries."""
+    from collections import OrderedDict
+
+    docs: "OrderedDict[str, dict]" = OrderedDict()
+    for chunk in chunks:
+        metadata = chunk.chunk_metadata or {}
+        doc_id = metadata.get("doc_id")
+        if doc_id is None:
+            continue
+        if doc_id not in docs:
+            docs[doc_id] = {
+                "doc_id": doc_id,
+                "source_filename": metadata.get("source_filename"),
+                "title": metadata.get("title") or metadata.get("source_filename"),
+                "chunk_count": 0,
+                "workspace_id": metadata.get("workspace_id"),
+                "pages": set(),
+            }
+        entry = docs[doc_id]
+        entry["chunk_count"] += 1
+        page_number = metadata.get("page_number")
+        if page_number is not None:
+            entry["pages"].add(page_number)
+
+    result: List[dict] = []
+    for entry in docs.values():
+        entry["pages"] = sorted(entry["pages"])
+        result.append(entry)
+    return result
+
+
 class PostgreSQLVectorStore(VectorStore):
     """PostgreSQL-backed vector store using pgvector for similarity search.
 
     Uses the application-scoped async engine and session factory.
     Requires database to be initialized via initialize_database().
 
-    Tenant scope is determined by the TENANT_ID environment variable
-    (default: "default-tenant"). This is a configuration-based approach
-    since authentication/authorization is not yet implemented.
+    Workspace scope is determined by the ``workspace_id`` constructor argument,
+    which must be a UUID.  When not provided, the server-resolved workspace ID
+    from :func:`app.core.workspace.resolve_workspace_id` is used.
     """
 
-    def __init__(self, tenant_id: Optional[str] = None):
+    def __init__(self, workspace_id: Optional[uuid.UUID] = None):
         if not is_database_initialized():
             raise RuntimeError(
                 "Database not initialized. Call initialize_database() at startup."
             )
 
-        self._tenant_id_str = tenant_id or os.environ.get("TENANT_ID", "default-tenant")
-        # Generate a deterministic UUID from the tenant string
-        self._tenant_id = uuid.uuid5(uuid.NAMESPACE_DNS, self._tenant_id_str)
+        if workspace_id is None:
+            workspace_id = resolve_workspace_id()
+        elif isinstance(workspace_id, str):
+            raise ValueError(
+                "PostgreSQLVectorStore requires a UUID workspace_id, "
+                f"got string {workspace_id!r}"
+            )
+
+        self._workspace_id: uuid.UUID = workspace_id
+        self._workspace_id_str: str = str(workspace_id)
         self._dimension = EXPECTED_DIMENSION
         self._session_factory = get_async_session_factory()
 
     async def _get_or_create_tenant(self, session) -> Tenant:
-        """Get or create the tenant for this store."""
-        stmt = select(Tenant).where(Tenant.id == self._tenant_id)
+        """Get or create the tenant (workspace) for this store."""
+        stmt = select(Tenant).where(Tenant.id == self._workspace_id)
         result = await session.execute(stmt)
         tenant = result.scalar_one_or_none()
 
         if tenant is None:
-            tenant = Tenant(id=self._tenant_id, name=self._tenant_id_str)
+            tenant = Tenant(id=self._workspace_id, name=self._workspace_id_str)
             session.add(tenant)
             await session.flush()
 
         return tenant
 
-    async def _get_or_create_document(self, session, doc_id: str) -> Document:
-        """Get or create a document for the given doc_id."""
+    async def _get_or_create_document(
+        self, session, doc_id: str
+    ) -> Document:
+        """Get or create a document for the given doc_id within this workspace."""
         stmt = select(Document).where(
-            Document.tenant_id == self._tenant_id,
+            Document.workspace_id == self._workspace_id,
             Document.doc_id == doc_id,
         )
         result = await session.execute(stmt)
         document = result.scalar_one_or_none()
 
         if document is None:
-            document = Document(tenant_id=self._tenant_id, doc_id=doc_id)
+            document = Document(
+                workspace_id=self._workspace_id,
+                doc_id=doc_id,
+                tenant_id=self._workspace_id,
+            )
             session.add(document)
             await session.flush()
 
@@ -124,22 +169,27 @@ class PostgreSQLVectorStore(VectorStore):
 
         # Group records by doc_id from metadata
         from collections import defaultdict
+
         records_by_doc: dict[str, List[VectorRecord]] = defaultdict(list)
         for record in records:
             doc_id = record.metadata.get("doc_id")
             if not doc_id:
-                raise ValueError(f"Record {record.id} missing required 'doc_id' in metadata")
+                raise ValueError(
+                    f"Record {record.id} missing required 'doc_id' in metadata"
+                )
             records_by_doc[doc_id].append(record)
 
         async with self._session_factory() as session:
-            tenant = await self._get_or_create_tenant(session)
+            await self._get_or_create_tenant(session)
 
             for doc_id, doc_records in records_by_doc.items():
                 document = await self._get_or_create_document(session, doc_id)
 
                 # Delete existing chunks for this document
                 await session.execute(
-                    delete(DocumentChunk).where(DocumentChunk.document_id == document.id)
+                    delete(DocumentChunk).where(
+                        DocumentChunk.document_id == document.id
+                    )
                 )
 
                 # Add new chunks
@@ -147,10 +197,11 @@ class PostgreSQLVectorStore(VectorStore):
                     chunk_index = record.metadata.get("chunk_index", 0)
                     chunk = DocumentChunk(
                         document_id=document.id,
+                        workspace_id=self._workspace_id,
                         chunk_index=chunk_index,
                         text=record.text,
                         embedding=record.embedding,
-                        metadata=record.metadata,
+                        chunk_metadata=record.metadata,
                     )
                     session.add(chunk)
 
@@ -159,7 +210,10 @@ class PostgreSQLVectorStore(VectorStore):
     async def async_search(
         self, query_embedding: List[float], k: int = 5
     ) -> List[SearchResult]:
-        """Search for the top-k most similar records using pgvector cosine similarity."""
+        """Search for the top-k most similar records using pgvector cosine similarity.
+
+        Results are scoped to this store's workspace.
+        """
         if k <= 0:
             return []
 
@@ -171,13 +225,16 @@ class PostgreSQLVectorStore(VectorStore):
             stmt = (
                 select(
                     DocumentChunk,
-                    (1 - DocumentChunk.embedding.cosine_distance(query_embedding)).label(
-                        "similarity"
-                    ),
+                    (
+                        1
+                        - DocumentChunk.embedding.cosine_distance(query_embedding)
+                    ).label("similarity"),
                 )
                 .join(Document, DocumentChunk.document_id == Document.id)
-                .where(Document.tenant_id == self._tenant_id)
-                .order_by(DocumentChunk.embedding.cosine_distance(query_embedding))
+                .where(Document.workspace_id == self._workspace_id)
+                .order_by(
+                    DocumentChunk.embedding.cosine_distance(query_embedding)
+                )
                 .limit(k)
             )
 
@@ -198,19 +255,20 @@ class PostgreSQLVectorStore(VectorStore):
             return search_results
 
     async def async_delete_by_metadata(self, metadata_filter: dict[str, Any]) -> int:
-        """Delete records matching a metadata filter asynchronously."""
+        """Delete records matching a metadata filter asynchronously.
+
+        Deletions are scoped to this store's workspace.
+        """
         if not metadata_filter:
             return 0
 
-        # We need to find documents whose chunks match the metadata filter
-        # For simplicity, we'll filter by doc_id if present, otherwise we need to scan
         doc_id = metadata_filter.get("doc_id")
 
         async with self._session_factory() as session:
             if doc_id:
-                # Fast path: delete by doc_id
+                # Fast path: delete by doc_id within this workspace.
                 stmt = select(Document).where(
-                    Document.tenant_id == self._tenant_id,
+                    Document.workspace_id == self._workspace_id,
                     Document.doc_id == doc_id,
                 )
                 result = await session.execute(stmt)
@@ -219,24 +277,20 @@ class PostgreSQLVectorStore(VectorStore):
                 if document is None:
                     return 0
 
-                # Delete chunks for this document
                 delete_stmt = delete(DocumentChunk).where(
                     DocumentChunk.document_id == document.id
                 )
                 result = await session.execute(delete_stmt)
                 deleted_count = result.rowcount
 
-                # Optionally delete the document if it has no more chunks
-                # For now, keep the document record
                 await session.commit()
                 return deleted_count
             else:
-                # Slow path: scan all chunks for the tenant and filter by metadata
-                # This is inefficient but matches the JSONL store behavior
+                # Slow path: scan all chunks for the workspace and filter by metadata.
                 stmt = (
                     select(DocumentChunk)
                     .join(Document, DocumentChunk.document_id == Document.id)
-                    .where(Document.tenant_id == self._tenant_id)
+                    .where(Document.workspace_id == self._workspace_id)
                 )
                 result = await session.execute(stmt)
                 chunks = result.scalars().all()
@@ -244,7 +298,8 @@ class PostgreSQLVectorStore(VectorStore):
                 deleted = 0
                 for chunk in chunks:
                     if all(
-                        chunk.chunk_metadata.get(k) == v for k, v in metadata_filter.items()
+                        chunk.chunk_metadata.get(k) == v
+                        for k, v in metadata_filter.items()
                     ):
                         await session.delete(chunk)
                         deleted += 1
@@ -253,34 +308,121 @@ class PostgreSQLVectorStore(VectorStore):
                 return deleted
 
     async def async_clear(self) -> None:
-        """Remove all records for the current tenant asynchronously."""
+        """Remove all records for the current workspace asynchronously."""
         async with self._session_factory() as session:
-            # Delete all chunks for tenant's documents
+            # Delete all chunks for workspace's documents
             stmt = delete(DocumentChunk).where(
                 DocumentChunk.document_id.in_(
-                    select(Document.id).where(Document.tenant_id == self._tenant_id)
+                    select(Document.id).where(
+                        Document.workspace_id == self._workspace_id
+                    )
                 )
             )
             await session.execute(stmt)
 
             # Optionally delete documents too
             doc_delete_stmt = delete(Document).where(
-                Document.tenant_id == self._tenant_id
+                Document.workspace_id == self._workspace_id
             )
             await session.execute(doc_delete_stmt)
 
             await session.commit()
 
     async def async_count(self) -> int:
-        """Return the number of records for the current tenant asynchronously."""
+        """Return the number of records for the current workspace asynchronously."""
         async with self._session_factory() as session:
             stmt = select(func.count(DocumentChunk.id)).where(
                 DocumentChunk.document_id.in_(
-                    select(Document.id).where(Document.tenant_id == self._tenant_id)
+                    select(Document.id).where(
+                        Document.workspace_id == self._workspace_id
+                    )
                 )
             )
             result = await session.execute(stmt)
             return result.scalar() or 0
+
+    # --- Document query operations (list / get / get-chunks) ---
+
+    async def async_list_documents(
+        self, workspace_id: Optional[str] = None
+    ) -> List[dict]:
+        """List ingested documents in this workspace."""
+        target_workspace = self._workspace_id
+        if workspace_id is not None:
+            target_workspace = (
+                uuid.uuid5(uuid.NAMESPACE_DNS, str(workspace_id))
+                if not isinstance(workspace_id, uuid.UUID)
+                else workspace_id
+            )
+
+        async with self._session_factory() as session:
+            stmt = (
+                select(DocumentChunk)
+                .join(Document, DocumentChunk.document_id == Document.id)
+                .where(Document.workspace_id == target_workspace)
+                .order_by(DocumentChunk.chunk_index)
+            )
+            result = await session.execute(stmt)
+            chunks = result.scalars().all()
+
+        return _summarize_chunks(chunks)
+
+    async def async_get_document(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> Optional[dict]:
+        """Get metadata for a single document within this workspace."""
+        documents = await self.async_list_documents(workspace_id=workspace_id)
+        for document in documents:
+            if document["doc_id"] == doc_id:
+                return document
+        return None
+
+    async def async_get_document_chunks(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> List[dict]:
+        """Get all chunks for a document with their source references."""
+        target_workspace = self._workspace_id
+        if workspace_id is not None:
+            target_workspace = (
+                uuid.uuid5(uuid.NAMESPACE_DNS, str(workspace_id))
+                if not isinstance(workspace_id, uuid.UUID)
+                else workspace_id
+            )
+
+        async with self._session_factory() as session:
+            stmt = (
+                select(DocumentChunk)
+                .join(Document, DocumentChunk.document_id == Document.id)
+                .where(
+                    Document.workspace_id == target_workspace,
+                    Document.doc_id == doc_id,
+                )
+                .order_by(DocumentChunk.chunk_index)
+            )
+            result = await session.execute(stmt)
+            chunks = result.scalars().all()
+
+        return [
+            {
+                "chunk_id": str(chunk.id),
+                "document_id": doc_id,
+                "doc_id": doc_id,
+                "chunk_index": chunk.chunk_index,
+                "text": chunk.text,
+                "page_number": chunk.chunk_metadata.get("page_number"),
+                "character_start": chunk.chunk_metadata.get(
+                    "character_start"
+                ),
+                "character_end": chunk.chunk_metadata.get("character_end"),
+                "section_path": chunk.chunk_metadata.get("section_path"),
+                "source_filename": chunk.chunk_metadata.get(
+                    "source_filename"
+                ),
+                "workspace_id": chunk.chunk_metadata.get("workspace_id"),
+                "metadata": chunk.chunk_metadata,
+            }
+            for chunk in chunks
+        ]
 
     # --- Sync methods (fallback for CLI/non-async contexts) ---
 
@@ -299,12 +441,30 @@ class PostgreSQLVectorStore(VectorStore):
         return _run_async(self.async_delete_by_metadata(metadata_filter))
 
     def clear(self) -> None:
-        """Remove all records for the current tenant (sync fallback)."""
+        """Remove all records for the current workspace (sync fallback)."""
         _run_async(self.async_clear())
 
     def count(self) -> int:
-        """Return the number of records for the current tenant (sync fallback)."""
+        """Return the number of records for the current workspace (sync fallback)."""
         return _run_async(self.async_count())
+
+    def list_documents(self, workspace_id: Optional[str] = None) -> List[dict]:
+        """List ingested documents in this workspace (sync fallback)."""
+        return _run_async(self.async_list_documents(workspace_id=workspace_id))
+
+    def get_document(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> Optional[dict]:
+        """Get metadata for a single document (sync fallback)."""
+        return _run_async(self.async_get_document(doc_id, workspace_id=workspace_id))
+
+    def get_document_chunks(
+        self, doc_id: str, workspace_id: Optional[str] = None
+    ) -> List[dict]:
+        """Get all chunks for a document with source references (sync fallback)."""
+        return _run_async(
+            self.async_get_document_chunks(doc_id, workspace_id=workspace_id)
+        )
 
     @property
     def dimension(self) -> Optional[int]:
