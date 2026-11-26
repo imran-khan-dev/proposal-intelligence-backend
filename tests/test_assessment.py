@@ -118,6 +118,24 @@ class _RaisingProvider(AIProvider):
         raise NotImplementedError
 
 
+class _RecordingProvider(AIProvider):
+    """Captures the prompt and returns a fixed assessment."""
+
+    def __init__(self, status, rationale):
+        self._status = status
+        self._rationale = rationale
+        self.user_text = None
+        self.system_prompt = None
+
+    def generate_structured(self, system_prompt, user_text, response_model):
+        self.system_prompt = system_prompt
+        self.user_text = user_text
+        return ComplianceAssessmentModel(status=self._status, rationale=self._rationale)
+
+    def chat_with_tools(self, messages, tools):
+        raise NotImplementedError
+
+
 class TestAssessmentStatuses:
     def test_adequately_supported_is_compliant(self):
         provider = _AssessmentProvider("compliant")
@@ -197,6 +215,67 @@ class TestAssessmentStatuses:
         assert draft.citations == before_citations
         assert draft.citation_verifications == before_verifications
         assert draft.compliance_status is None
+
+
+class TestAssessmentGuards:
+    def test_empty_rationale_is_needs_review(self):
+        provider = _AssessmentProvider("compliant", rationale="")
+        result = assess_requirement_compliance(_draft(), provider)
+        assert result.status == ComplianceStatus.NEEDS_REVIEW
+
+    def test_whitespace_rationale_is_needs_review(self):
+        provider = _AssessmentProvider("compliant", rationale="   ")
+        result = assess_requirement_compliance(_draft(), provider)
+        assert result.status == ComplianceStatus.NEEDS_REVIEW
+
+    def test_non_compliant_with_weak_uncertainty_is_needs_review(self):
+        provider = _AssessmentProvider("non_compliant")
+        result = assess_requirement_compliance(
+            _draft(uncertainty=UncertaintyLevel.WEAK), provider
+        )
+        assert result.status == ComplianceStatus.NEEDS_REVIEW
+
+    def test_non_compliant_with_none_uncertainty_is_needs_review(self):
+        provider = _AssessmentProvider("non_compliant")
+        result = assess_requirement_compliance(
+            _draft(uncertainty=UncertaintyLevel.NONE), provider
+        )
+        assert result.status == ComplianceStatus.NEEDS_REVIEW
+
+    def test_non_compliant_with_supported_uncertainty_allowed(self):
+        provider = _AssessmentProvider("non_compliant")
+        result = assess_requirement_compliance(
+            _draft(uncertainty=UncertaintyLevel.SUPPORTED), provider
+        )
+        assert result.status == ComplianceStatus.NON_COMPLIANT
+
+    def test_status_is_normalized_case_and_whitespace(self):
+        provider = _AssessmentProvider("  COMPLIANT  ", rationale="ok")
+        result = assess_requirement_compliance(_draft(), provider)
+        assert result.status == ComplianceStatus.COMPLIANT
+
+    def test_rationale_preserved_in_result(self):
+        provider = _AssessmentProvider("compliant", rationale="meets requirement")
+        result = assess_requirement_compliance(_draft(), provider)
+        assert result.rationale == "meets requirement"
+
+    def test_prompt_includes_only_verified_evidence(self):
+        draft = _draft(
+            citations=[
+                EvidenceCitation("chunk_1", "SAML 2.0 single sign-on", 0.9),
+                EvidenceCitation("ghost", "SECRET FABRICATED", 0.9),
+            ],
+            verifications=[_verified("chunk_1"), _failed("ghost")],
+        )
+        provider = _RecordingProvider("compliant", "ok")
+        assess_requirement_compliance(draft, provider)
+        # Complete requirement context is present.
+        assert draft.requirement_text in provider.user_text
+        assert draft.requirement_key in provider.user_text
+        # Only the verified citation is present; failed/fabricated is excluded.
+        assert "SAML 2.0 single sign-on" in provider.user_text
+        assert "SECRET FABRICATED" not in provider.user_text
+        assert "ghost" not in provider.user_text
 
 
 class TestAssessmentPersistence:

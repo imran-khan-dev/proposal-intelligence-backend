@@ -106,6 +106,7 @@ Return JSON: {"status": "...", "rationale": "concise reason"}"""
 
 
 def _build_assessment_prompt(
+    requirement_key: str,
     requirement_text: str,
     draft_answer: Optional[str],
     uncertainty: UncertaintyLevel,
@@ -113,7 +114,7 @@ def _build_assessment_prompt(
 ) -> str:
     """Build the user prompt using only verified citations."""
     parts = [
-        "REQUIREMENT:",
+        f"REQUIREMENT ({requirement_key}):",
         requirement_text,
         "",
         f"DRAFT ANSWER: {draft_answer or '(none)'}",
@@ -183,6 +184,7 @@ def assess_requirement_compliance(
         )
 
     prompt = _build_assessment_prompt(
+        requirement_key=draft.requirement_key,
         requirement_text=draft.requirement_text,
         draft_answer=draft.draft_answer,
         uncertainty=draft.uncertainty,
@@ -205,7 +207,17 @@ def assess_requirement_compliance(
         )
 
     raw_status = str(parsed.get("status", "")).strip().lower()
-    rationale = str(parsed.get("rationale", "")).strip() or "No rationale provided."
+    rationale = str(parsed.get("rationale", "")).strip()
+
+    # A meaningful rationale is mandatory: never assert a definitive status
+    # without an explanation.
+    if not rationale:
+        return _needs_review(
+            "Assessment returned no rationale; defaulting to needs_review.",
+            supporting=len(verified),
+            total=total,
+        )
+
     try:
         status = ComplianceStatus(raw_status)
     except ValueError:
@@ -220,6 +232,19 @@ def assess_requirement_compliance(
         return _needs_review(
             "Assessment claimed a definitive status without verified evidence.",
             supporting=0,
+            total=total,
+        )
+
+    # ``non_compliant`` requires explicit, adequate evidence. When the draft's
+    # own uncertainty is weak/none, the evidence is not explicit enough to
+    # establish that the requirement cannot be met -> needs_review.
+    if status == ComplianceStatus.NON_COMPLIANT and draft.uncertainty in (
+        UncertaintyLevel.WEAK,
+        UncertaintyLevel.NONE,
+    ):
+        return _needs_review(
+            "Verified evidence is too weak to establish non-compliance; needs review.",
+            supporting=len(verified),
             total=total,
         )
 
