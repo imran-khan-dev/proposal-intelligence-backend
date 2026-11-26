@@ -21,8 +21,10 @@ from app.modules.drafting.schema import (
     EvidenceCitationResponse,
     EvidencePassageResponse,
     RequirementDraftResponse,
+    ReviewAuditEventResponse,
     ReviewDraftRequest,
     ReviewDraftResponse,
+    ReviewHistoryResponse,
     SingleDraftResponse,
     StartDraftingRequest,
     StartDraftingResponse,
@@ -624,4 +626,73 @@ async def review_draft_controller(
         reviewer_comment=updated_run.reviewer_comment,
         citation_reviews=_citation_reviews_from_stored(updated_run.citation_reviews),
         reviewed_at=updated_run.reviewed_at,
+    )
+
+
+# --- Human Review Audit History (M4.2) ---
+
+async def get_review_history_controller(
+    doc_id: str,
+    requirement_key: str,
+    workspace_id: Optional[str] = None,
+) -> ReviewHistoryResponse:
+    """Retrieve the complete append-only review audit history for a requirement.
+
+    Returns events ordered chronologically (oldest first).
+    """
+    ws_uuid = _resolve_workspace_id(workspace_id)
+
+    # Get the requirement
+    req_repo = PostgresRequirementRepository()
+    try:
+        requirement = await req_repo.get_requirement(ws_uuid, doc_id, requirement_key)
+    except Exception as exc:
+        logger.exception("Failed to get requirement %s for %s", requirement_key, doc_id)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get requirement: {exc}"
+        ) from exc
+
+    if requirement is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Requirement '{requirement_key}' not found for document '{doc_id}'",
+        )
+
+    requirement_id = await req_repo.get_requirement_id(ws_uuid, doc_id, requirement_key)
+    if requirement_id is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Requirement '{requirement_key}' not found in database",
+        )
+
+    drafting_repo = PostgresDraftingRepository()
+
+    # Get review history
+    audit_events = await drafting_repo.get_review_history(ws_uuid, requirement_id)
+
+    # Convert to response schema
+    events = [
+        ReviewAuditEventResponse(
+            id=event.id,
+            workspace_id=event.workspace_id,
+            requirement_id=event.requirement_id,
+            draft_run_id=event.draft_run_id,
+            previous_review_status=event.previous_review_status,
+            review_status=event.review_status,
+            decision=event.decision,
+            reviewer_edited_answer=event.reviewer_edited_answer,
+            reviewer_compliance_status=event.reviewer_compliance_status,
+            reviewer_compliance_rationale=event.reviewer_compliance_rationale,
+            reviewer_comment=event.reviewer_comment,
+            citation_reviews=_citation_reviews_from_stored(event.citation_reviews),
+            reviewed_at=event.reviewed_at,
+            reviewer_workspace_id=event.reviewer_workspace_id,
+        )
+        for event in audit_events
+    ]
+
+    return ReviewHistoryResponse(
+        requirement_id=requirement_id,
+        requirement_key=requirement_key,
+        events=events,
     )

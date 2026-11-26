@@ -279,3 +279,33 @@ class ReviewDraftResponse(BaseModel):
     reviewer_comment: str = Field(..., description="Reviewer's comment")
     citation_reviews: List[CitationReviewResponse] = Field(default_factory=list, description="Citation decisions")
     reviewed_at: datetime = Field(..., description="Review completion timestamp")
+
+
+class ReviewAuditEventResponse(BaseModel):
+    """Single append-only audit event for a human review action (M4.2)."""
+
+    id: UUID = Field(..., description="Audit event ID")
+    workspace_id: UUID = Field(..., description="Workspace UUID")
+    requirement_id: UUID = Field(..., description="Requirement UUID")
+    draft_run_id: UUID = Field(..., description="Draft generation run UUID")
+    previous_review_status: Optional[str] = Field(None, description="Review status before this event")
+    review_status: str = Field(..., description="Review decision: approved|changes_requested")
+    decision: str = Field(..., description="Explicit decision: approve|request_changes")
+    reviewer_edited_answer: Optional[str] = Field(None, description="Reviewer's edited answer")
+    reviewer_compliance_status: Optional[str] = Field(None, description="Reviewer's compliance override")
+    reviewer_compliance_rationale: Optional[str] = Field(None, description="Reviewer's compliance rationale")
+    reviewer_comment: str = Field(..., description="Reviewer's comment/reason for the decision")
+    citation_reviews: List[CitationReviewResponse] = Field(default_factory=list, description="Per-citation decisions")
+    reviewed_at: datetime = Field(..., description="Review completion timestamp")
+    reviewer_workspace_id: UUID = Field(..., description="Reviewer's workspace (audit)")
+
+
+class ReviewHistoryResponse(BaseModel):
+    """Complete review audit history for a requirement (M4.2).
+
+    Events are ordered chronologically (oldest first) — append-only.
+    """
+
+    requirement_id: UUID = Field(..., description="Database UUID of the requirement")
+    requirement_key: str = Field(..., description="Stable requirement identifier")
+    events: List[ReviewAuditEventResponse] = Field(default_factory=list, description="Chronological audit events")

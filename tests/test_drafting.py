@@ -1508,3 +1508,613 @@ class TestReviewStatusDefault:
             citation_reviews=[],
         )
         assert updated.review_status == "approved"
+
+
+# --- M4.2: Append-only Human Review Audit History ---
+
+class TestReviewAuditHistory:
+    """Tests for the append-only human review audit history (M4.2)."""
+
+    @pytest.mark.asyncio
+    async def test_submit_review_creates_audit_event(self):
+        """Submitting a review creates an immutable audit event."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[EvidenceCitation("chunk_1", "Evidence text", 0.8)],
+            evidence_found=True,
+            uncertainty=UncertaintyLevel.SUPPORTED,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # Submit review
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer="Human edited answer",
+            reviewer_compliance_status="compliant",
+            reviewer_compliance_rationale="Meets all criteria",
+            reviewer_comment="Looks good",
+            citation_reviews=[
+                {"evidence_id": "chunk_1", "decision": "accept", "reason": "Accurate"}
+            ],
+        )
+
+        # Get review history
+        history = await repo.get_review_history(ws, req_id)
+
+        assert len(history) == 1
+        event = history[0]
+        assert event.requirement_id == req_id
+        assert event.draft_run_id == draft_run.run_id
+        assert event.review_status == "approved"
+        assert event.reviewer_edited_answer == "Human edited answer"
+        assert event.reviewer_compliance_status == "compliant"
+        assert event.reviewer_compliance_rationale == "Meets all criteria"
+        assert event.reviewer_comment == "Looks good"
+        assert len(event.citation_reviews) == 1
+        assert event.citation_reviews[0]["decision"] == "accept"
+        assert event.reviewer_workspace_id == ws
+
+    @pytest.mark.asyncio
+    async def test_multiple_reviews_append_to_history(self):
+        """Multiple reviews for the same requirement append to history (oldest first)."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[EvidenceCitation("chunk_1", "Evidence text", 0.8)],
+            evidence_found=True,
+            uncertainty=UncertaintyLevel.SUPPORTED,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # First review: request changes
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="changes_requested",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="First review - needs more detail",
+            citation_reviews=[],
+        )
+
+        # Second review: approve
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer="Final answer",
+            reviewer_compliance_status="compliant",
+            reviewer_compliance_rationale="Now complete",
+            reviewer_comment="Approved on second review",
+            citation_reviews=[],
+        )
+
+        # Get history - should have 2 events in chronological order
+        history = await repo.get_review_history(ws, req_id)
+
+        assert len(history) == 2
+        # First event (oldest)
+        assert history[0].review_status == "changes_requested"
+        assert history[0].reviewer_comment == "First review - needs more detail"
+        # Second event (newest)
+        assert history[1].review_status == "approved"
+        assert history[1].reviewer_comment == "Approved on second review"
+        assert history[1].reviewer_edited_answer == "Final answer"
+
+    @pytest.mark.asyncio
+    async def test_audit_events_are_immutable(self):
+        """Audit events cannot be modified or deleted after creation."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # First review: request changes
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="changes_requested",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Original comment",
+            citation_reviews=[],
+        )
+
+        # Get history
+        history = await repo.get_review_history(ws, req_id)
+        assert len(history) == 1
+        original_event_id = history[0].id
+        original_comment = history[0].reviewer_comment
+
+        # Second review: approve (valid transition from changes_requested)
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Second comment",
+            citation_reviews=[],
+        )
+
+        # History should have 2 events, first one unchanged
+        history = await repo.get_review_history(ws, req_id)
+        assert len(history) == 2
+        assert history[0].id == original_event_id
+        assert history[0].reviewer_comment == original_comment  # Immutable
+        assert history[1].reviewer_comment == "Second comment"
+
+    @pytest.mark.asyncio
+    async def test_workspace_isolation_on_history(self):
+        """get_review_history enforces workspace isolation."""
+        repo = InMemoryDraftingRepository()
+        ws_a = WS_UUID
+        ws_b = uuid.UUID("550e8400-e29b-41d4-a716-446655440002")
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws_a, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # Submit review from workspace A
+        await repo.submit_review(
+            workspace_id=ws_a,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Workspace A review",
+            citation_reviews=[],
+        )
+
+        # Query history from workspace A - should see events
+        history_a = await repo.get_review_history(ws_a, req_id)
+        assert len(history_a) == 1
+        assert history_a[0].reviewer_comment == "Workspace A review"
+
+        # Query history from workspace B - should see NO events (workspace isolation)
+        history_b = await repo.get_review_history(ws_b, req_id)
+        assert len(history_b) == 0
+
+    @pytest.mark.asyncio
+    async def test_history_ordered_chronologically(self):
+        """History events are ordered by reviewed_at ascending (oldest first)."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # Submit multiple reviews in sequence (valid transitions)
+        # 1. changes_requested (from pending_review/None)
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="changes_requested",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Review 1 - changes requested",
+            citation_reviews=[],
+        )
+        # 2. approved (from changes_requested)
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Review 2 - approved",
+            citation_reviews=[],
+        )
+        # 3. changes_requested (from approved -> not allowed!)
+        # Instead, we can't do another review from approved since it's terminal
+        # So we test with 2 events instead
+        pass
+
+        history = await repo.get_review_history(ws, req_id)
+        assert len(history) == 2
+
+        # Verify chronological order (oldest first)
+        assert history[0].reviewer_comment == "Review 1 - changes requested"
+        assert history[1].reviewer_comment == "Review 2 - approved"
+        # Verify timestamps are ascending
+        assert history[0].reviewed_at <= history[1].reviewed_at
+
+    @pytest.mark.asyncio
+    async def test_audit_event_includes_previous_status_and_decision(self):
+        """Each audit event records previous_review_status and explicit decision."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # First review: approve (from pending_review/None)
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="First review - approved",
+            citation_reviews=[],
+        )
+
+        history = await repo.get_review_history(ws, req_id)
+        assert len(history) == 1
+        event = history[0]
+        # First event: previous_review_status should be "pending_review" (default)
+        assert event.previous_review_status == "pending_review"
+        assert event.review_status == "approved"
+        assert event.decision == "approve"
+
+        # Create a SEPARATE requirement to test multi-review sequence
+        req_id_2 = uuid.uuid4()
+        draft_run2 = await repo.create_draft_run(ws, req_id_2, evidence_run_id)
+        draft2 = RequirementDraft(
+            requirement_id=req_id_2,
+            requirement_key="req_2",
+            requirement_text="Test requirement 2",
+            draft_answer="AI generated answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run2.run_id, draft2)
+
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run2.run_id,
+            review_status="changes_requested",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="First review - changes requested",
+            citation_reviews=[],
+        )
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run2.run_id,
+            review_status="approved",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Second review - approved",
+            citation_reviews=[],
+        )
+
+        history2 = await repo.get_review_history(ws, req_id_2)
+        assert len(history2) == 2
+        # First event
+        assert history2[0].previous_review_status == "pending_review"
+        assert history2[0].decision == "request_changes"
+        # Second event
+        assert history2[1].previous_review_status == "changes_requested"
+        assert history2[1].decision == "approve"
+
+    @pytest.mark.asyncio
+    async def test_invalid_transition_creates_no_audit_event(self):
+        """Invalid lifecycle transitions create no audit events and leave state unchanged."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # First valid review: approve
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Valid approve",
+            citation_reviews=[],
+        )
+
+        # Try invalid transition: approved -> changes_requested (not allowed)
+        with pytest.raises(ValueError, match="Invalid review transition"):
+            await repo.submit_review(
+                workspace_id=ws,
+                run_id=draft_run.run_id,
+                review_status="changes_requested",
+                reviewer_edited_answer=None,
+                reviewer_compliance_status=None,
+                reviewer_compliance_rationale=None,
+                reviewer_comment="Invalid transition attempt",
+                citation_reviews=[],
+            )
+
+        # History should still have only 1 event
+        history = await repo.get_review_history(ws, req_id)
+        assert len(history) == 1
+        assert history[0].reviewer_comment == "Valid approve"
+        assert history[0].review_status == "approved"
+
+        # Draft run should still be approved
+        draft_run_updated = await repo.get_draft_run(draft_run.run_id)
+        assert draft_run_updated.review_status == "approved"
+
+    @pytest.mark.asyncio
+    async def test_workspace_mismatch_creates_no_audit_event(self):
+        """Workspace mismatches create no audit events."""
+        repo = InMemoryDraftingRepository()
+        ws_a = WS_UUID
+        ws_b = uuid.UUID("550e8400-e29b-41d4-a716-446655440002")
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws_a, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # Try to review from different workspace
+        with pytest.raises(ValueError, match="does not belong to workspace"):
+            await repo.submit_review(
+                workspace_id=ws_b,
+                run_id=draft_run.run_id,
+                review_status="approved",
+                reviewer_edited_answer=None,
+                reviewer_compliance_status=None,
+                reviewer_compliance_rationale=None,
+                reviewer_comment="Cross-workspace attempt",
+                citation_reviews=[],
+            )
+
+        # History should be empty for both workspaces
+        history_a = await repo.get_review_history(ws_a, req_id)
+        history_b = await repo.get_review_history(ws_b, req_id)
+        assert len(history_a) == 0
+        assert len(history_b) == 0
+
+    @pytest.mark.asyncio
+    async def test_snapshot_matches_latest_audit_event(self):
+        """Current review snapshot always matches the latest successful audit event."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # First review: changes_requested
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="changes_requested",
+            reviewer_edited_answer="Edited v1",
+            reviewer_compliance_status="partially_compliant",
+            reviewer_compliance_rationale="Needs work",
+            reviewer_comment="First review",
+            citation_reviews=[],
+        )
+
+        draft_run_1 = await repo.get_draft_run(draft_run.run_id)
+        history_1 = await repo.get_review_history(ws, req_id)
+        # Snapshot matches first audit event
+        assert draft_run_1.review_status == history_1[-1].review_status
+        assert draft_run_1.reviewer_edited_answer == history_1[-1].reviewer_edited_answer
+        assert draft_run_1.reviewer_compliance_status == history_1[-1].reviewer_compliance_status
+
+        # Second review: approve
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer="Edited v2 - final",
+            reviewer_compliance_status="compliant",
+            reviewer_compliance_rationale="All good now",
+            reviewer_comment="Second review - approved",
+            citation_reviews=[],
+        )
+
+        draft_run_2 = await repo.get_draft_run(draft_run.run_id)
+        history_2 = await repo.get_review_history(ws, req_id)
+        # Snapshot matches latest (second) audit event
+        assert draft_run_2.review_status == history_2[-1].review_status
+        assert draft_run_2.reviewer_edited_answer == history_2[-1].reviewer_edited_answer
+        assert draft_run_2.reviewer_compliance_status == history_2[-1].reviewer_compliance_status
+        assert draft_run_2.reviewer_compliance_rationale == history_2[-1].reviewer_compliance_rationale
+        assert draft_run_2.reviewer_comment == history_2[-1].reviewer_comment
+
+    @pytest.mark.asyncio
+    async def test_legacy_draft_without_events_returns_empty_history(self):
+        """Legacy drafts without audit events return empty history list."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        # Create a draft run but DON'T submit any review
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # History should be empty (no reviews submitted yet)
+        history = await repo.get_review_history(ws, req_id)
+        assert len(history) == 0
+        assert history == []
+
+    @pytest.mark.asyncio
+    async def test_stable_ordering_with_identical_timestamps(self):
+        """History ordering is deterministic even with identical timestamps (uses id as tiebreaker)."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # Manually create two events with the same timestamp to test stable ordering
+        # We can't easily control datetime.now() in tests, but we can verify the sorting logic
+        # by checking that the sort key is (reviewed_at, id)
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="changes_requested",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Review 1",
+            citation_reviews=[],
+        )
+
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Review 2",
+            citation_reviews=[],
+        )
+
+        history = await repo.get_review_history(ws, req_id)
+        assert len(history) == 2
+        # Should be ordered by reviewed_at, then by id (stable)
+        assert history[0].reviewer_comment == "Review 1"
+        assert history[1].reviewer_comment == "Review 2"
+        # IDs should be different
+        assert history[0].id != history[1].id

@@ -21,6 +21,7 @@ from app.models.drafting import (
     DraftGenerationRun,
     EvidenceRecord,
     EvidenceRetrievalRun,
+    ReviewAuditEvent,
 )
 from app.modules.drafting.generation import EvidenceCitation, RequirementDraft, UncertaintyLevel
 from app.modules.drafting.retrieval import EvidencePassage
@@ -154,6 +155,39 @@ class DraftingRepository(ABC):
         """Get a draft run for review, enforcing workspace isolation."""
         ...
 
+    # --- Human Review Audit History (M4.2) ---
+
+    @abstractmethod
+    async def create_review_audit_event(
+        self,
+        workspace_id: uuid.UUID,
+        requirement_id: uuid.UUID,
+        draft_run_id: uuid.UUID,
+        review_status: str,
+        reviewer_edited_answer: Optional[str],
+        reviewer_compliance_status: Optional[str],
+        reviewer_compliance_rationale: Optional[str],
+        reviewer_comment: str,
+        citation_reviews: List[dict],
+        reviewer_workspace_id: uuid.UUID,
+        previous_review_status: Optional[str] = None,
+    ) -> "ReviewAuditEventRecord":
+        """Create an append-only audit event for a human review submission.
+
+        Records are immutable and never modified or deleted.
+        """
+        ...
+
+    @abstractmethod
+    async def get_review_history(
+        self, workspace_id: uuid.UUID, requirement_id: uuid.UUID
+    ) -> List["ReviewAuditEventRecord"]:
+        """Get the complete review audit history for a requirement, ordered chronologically.
+
+        Returns events oldest-first (append-only order).
+        """
+        ...
+
 
 # --- Pydantic Records for API/Service Layer ---
 
@@ -217,6 +251,28 @@ class DraftGenerationRunRecord(BaseModel):
     errors: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class ReviewAuditEventRecord(BaseModel):
+    """Append-only audit event for human review actions (M4.2)."""
+
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    requirement_id: uuid.UUID
+    draft_run_id: uuid.UUID
+    previous_review_status: Optional[str] = None
+    review_status: str
+    decision: str
+    reviewer_edited_answer: Optional[str] = None
+    reviewer_compliance_status: Optional[str] = None
+    reviewer_compliance_rationale: Optional[str] = None
+    reviewer_comment: str
+    citation_reviews: List[dict] = Field(default_factory=list)
+    reviewed_at: datetime
+    reviewer_workspace_id: uuid.UUID
+
+    class Config:
+        from_attributes = True
 
 
 # --- Conversion Helpers ---
@@ -306,6 +362,25 @@ def _draft_run_to_record(run: DraftGenerationRun) -> DraftGenerationRunRecord:
         errors=list(run.errors or []),
         created_at=run.created_at,
         updated_at=run.updated_at,
+    )
+
+
+def _audit_event_to_record(event: ReviewAuditEvent) -> ReviewAuditEventRecord:
+    return ReviewAuditEventRecord(
+        id=event.id,
+        workspace_id=event.workspace_id,
+        requirement_id=event.requirement_id,
+        draft_run_id=event.draft_run_id,
+        previous_review_status=event.previous_review_status,
+        review_status=event.review_status,
+        decision=event.decision,
+        reviewer_edited_answer=event.reviewer_edited_answer,
+        reviewer_compliance_status=event.reviewer_compliance_status,
+        reviewer_compliance_rationale=event.reviewer_compliance_rationale,
+        reviewer_comment=event.reviewer_comment,
+        citation_reviews=list(event.citation_reviews or []),
+        reviewed_at=event.reviewed_at,
+        reviewer_workspace_id=event.reviewer_workspace_id,
     )
 
 
@@ -526,7 +601,13 @@ class PostgresDraftingRepository(DraftingRepository):
         reviewer_comment: str,
         citation_reviews: List[dict],
     ) -> DraftGenerationRunRecord:
-        """Submit a human review for a draft run."""
+        """Submit a human review for a draft run.
+
+        Updates the draft run and creates an audit event atomically in a single transaction.
+        """
+        # Map review_status to explicit decision
+        decision = "approve" if review_status == "approved" else "request_changes"
+
         async with self._session_factory() as session:
             run = await session.get(DraftGenerationRun, run_id)
             if run is None:
@@ -550,6 +631,7 @@ class PostgresDraftingRepository(DraftingRepository):
                     f"Invalid review transition: {current_status} -> {review_status}"
                 )
 
+            # Update draft run
             run.review_status = review_status
             if reviewer_edited_answer is not None:
                 run.reviewer_edited_answer = reviewer_edited_answer
@@ -561,8 +643,28 @@ class PostgresDraftingRepository(DraftingRepository):
             run.citation_reviews = citation_reviews
             run.reviewed_at = datetime.now(timezone.utc)
             run.reviewer_workspace_id = workspace_id
+
+            # Create append-only audit event (M4.2) in same transaction
+            audit_event = ReviewAuditEvent(
+                workspace_id=workspace_id,
+                requirement_id=run.requirement_id,
+                draft_run_id=run.id,
+                previous_review_status=current_status,
+                review_status=review_status,
+                decision=decision,
+                reviewer_edited_answer=reviewer_edited_answer,
+                reviewer_compliance_status=reviewer_compliance_status,
+                reviewer_compliance_rationale=reviewer_compliance_rationale,
+                reviewer_comment=reviewer_comment,
+                citation_reviews=citation_reviews,
+                reviewer_workspace_id=workspace_id,
+            )
+            session.add(audit_event)
+
+            # Single commit for both changes
             await session.commit()
             await session.refresh(run)
+
             return _draft_run_to_record(run)
 
     async def get_draft_run_for_review(
@@ -575,6 +677,64 @@ class PostgresDraftingRepository(DraftingRepository):
                 return None
             return _draft_run_to_record(run)
 
+    async def create_review_audit_event(
+        self,
+        workspace_id: uuid.UUID,
+        requirement_id: uuid.UUID,
+        draft_run_id: uuid.UUID,
+        review_status: str,
+        reviewer_edited_answer: Optional[str],
+        reviewer_compliance_status: Optional[str],
+        reviewer_compliance_rationale: Optional[str],
+        reviewer_comment: str,
+        citation_reviews: List[dict],
+        reviewer_workspace_id: uuid.UUID,
+        previous_review_status: Optional[str] = None,
+    ) -> ReviewAuditEventRecord:
+        """Create an append-only audit event for a human review submission.
+
+        Records are immutable and never modified or deleted.
+        """
+        decision = "approve" if review_status == "approved" else "request_changes"
+        async with self._session_factory() as session:
+            event = ReviewAuditEvent(
+                workspace_id=workspace_id,
+                requirement_id=requirement_id,
+                draft_run_id=draft_run_id,
+                previous_review_status=previous_review_status,
+                review_status=review_status,
+                decision=decision,
+                reviewer_edited_answer=reviewer_edited_answer,
+                reviewer_compliance_status=reviewer_compliance_status,
+                reviewer_compliance_rationale=reviewer_compliance_rationale,
+                reviewer_comment=reviewer_comment,
+                citation_reviews=citation_reviews,
+                reviewer_workspace_id=reviewer_workspace_id,
+            )
+            session.add(event)
+            await session.commit()
+            await session.refresh(event)
+            return _audit_event_to_record(event)
+
+    async def get_review_history(
+        self, workspace_id: uuid.UUID, requirement_id: uuid.UUID
+    ) -> List[ReviewAuditEventRecord]:
+        """Get the complete review audit history for a requirement, ordered chronologically.
+
+        Returns events oldest-first (append-only order). Uses reviewed_at + id for stable ordering.
+        """
+        async with self._session_factory() as session:
+            stmt = (
+                select(ReviewAuditEvent)
+                .where(
+                    ReviewAuditEvent.workspace_id == workspace_id,
+                    ReviewAuditEvent.requirement_id == requirement_id,
+                )
+                .order_by(ReviewAuditEvent.reviewed_at.asc(), ReviewAuditEvent.id.asc())
+            )
+            result = await session.execute(stmt)
+            return [_audit_event_to_record(e) for e in result.scalars().all()]
+
 
 # --- In-Memory Implementation for Tests ---
 
@@ -585,6 +745,7 @@ class InMemoryDraftingRepository(DraftingRepository):
         self._evidence_runs: dict[uuid.UUID, EvidenceRetrievalRunRecord] = {}
         self._evidence_records: dict[uuid.UUID, List[EvidenceRecordRecord]] = {}
         self._draft_runs: dict[uuid.UUID, DraftGenerationRunRecord] = {}
+        self._review_audit_events: List[ReviewAuditEventRecord] = []
 
     # Evidence Retrieval Runs
 
@@ -801,7 +962,83 @@ class InMemoryDraftingRepository(DraftingRepository):
         record.reviewed_at = datetime.now(timezone.utc)
         record.reviewer_workspace_id = workspace_id
         record.updated_at = datetime.now(timezone.utc)
+
+        # Map review_status to explicit decision
+        decision = "approve" if review_status == "approved" else "request_changes"
+
+        # Create append-only audit event (M4.2)
+        audit_event = ReviewAuditEventRecord(
+            id=uuid.uuid4(),
+            workspace_id=workspace_id,
+            requirement_id=record.requirement_id,
+            draft_run_id=record.run_id,
+            previous_review_status=current_status,
+            review_status=review_status,
+            decision=decision,
+            reviewer_edited_answer=reviewer_edited_answer,
+            reviewer_compliance_status=reviewer_compliance_status,
+            reviewer_compliance_rationale=reviewer_compliance_rationale,
+            reviewer_comment=reviewer_comment,
+            citation_reviews=citation_reviews,
+            reviewed_at=datetime.now(timezone.utc),
+            reviewer_workspace_id=workspace_id,
+        )
+        self._review_audit_events.append(audit_event)
+
         return record
+
+    async def create_review_audit_event(
+        self,
+        workspace_id: uuid.UUID,
+        requirement_id: uuid.UUID,
+        draft_run_id: uuid.UUID,
+        review_status: str,
+        reviewer_edited_answer: Optional[str],
+        reviewer_compliance_status: Optional[str],
+        reviewer_compliance_rationale: Optional[str],
+        reviewer_comment: str,
+        citation_reviews: List[dict],
+        reviewer_workspace_id: uuid.UUID,
+        previous_review_status: Optional[str] = None,
+    ) -> ReviewAuditEventRecord:
+        """Create an append-only audit event for a human review submission (in-memory).
+
+        Records are immutable and never modified or deleted.
+        """
+        decision = "approve" if review_status == "approved" else "request_changes"
+        event = ReviewAuditEventRecord(
+            id=uuid.uuid4(),
+            workspace_id=workspace_id,
+            requirement_id=requirement_id,
+            draft_run_id=draft_run_id,
+            previous_review_status=previous_review_status,
+            review_status=review_status,
+            decision=decision,
+            reviewer_edited_answer=reviewer_edited_answer,
+            reviewer_compliance_status=reviewer_compliance_status,
+            reviewer_compliance_rationale=reviewer_compliance_rationale,
+            reviewer_comment=reviewer_comment,
+            citation_reviews=citation_reviews,
+            reviewed_at=datetime.now(timezone.utc),
+            reviewer_workspace_id=reviewer_workspace_id,
+        )
+        self._review_audit_events.append(event)
+        return event
+
+    async def get_review_history(
+        self, workspace_id: uuid.UUID, requirement_id: uuid.UUID
+    ) -> List[ReviewAuditEventRecord]:
+        """Get the complete review audit history for a requirement, ordered chronologically (in-memory).
+
+        Returns events oldest-first (append-only order). Uses reviewed_at + id for stable ordering.
+        """
+        events = [
+            e for e in self._review_audit_events
+            if e.workspace_id == workspace_id and e.requirement_id == requirement_id
+        ]
+        # Sort by reviewed_at ascending, then id for stable ordering
+        events.sort(key=lambda e: (e.reviewed_at, e.id))
+        return events
 
     async def get_draft_run_for_review(
         self, workspace_id: uuid.UUID, run_id: uuid.UUID
