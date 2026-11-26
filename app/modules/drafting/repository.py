@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy import select
@@ -125,6 +126,34 @@ class DraftingRepository(ABC):
         """List all draft runs for a requirement (for history)."""
         ...
 
+    # --- Human Review (M4.1) ---
+
+    @abstractmethod
+    async def submit_review(
+        self,
+        workspace_id: uuid.UUID,
+        run_id: uuid.UUID,
+        review_status: str,  # "approved" | "changes_requested"
+        reviewer_edited_answer: Optional[str],
+        reviewer_compliance_status: Optional[str],
+        reviewer_compliance_rationale: Optional[str],
+        reviewer_comment: str,
+        citation_reviews: List[dict],
+    ) -> "DraftGenerationRunRecord":
+        """Submit a human review for a draft run.
+
+        Returns the updated draft run record with review fields populated.
+        Raises ValueError if the run doesn't exist or doesn't belong to the workspace.
+        """
+        ...
+
+    @abstractmethod
+    async def get_draft_run_for_review(
+        self, workspace_id: uuid.UUID, run_id: uuid.UUID
+    ) -> Optional["DraftGenerationRunRecord"]:
+        """Get a draft run for review, enforcing workspace isolation."""
+        ...
+
 
 # --- Pydantic Records for API/Service Layer ---
 
@@ -175,6 +204,15 @@ class DraftGenerationRunRecord(BaseModel):
     uncertainty_notes: List[str] = Field(default_factory=list)
     compliance_status: Optional[str] = None
     compliance_rationale: Optional[str] = None
+    # Human review fields (M4.1)
+    review_status: Optional[str] = None
+    reviewer_edited_answer: Optional[str] = None
+    reviewer_compliance_status: Optional[str] = None
+    reviewer_compliance_rationale: Optional[str] = None
+    reviewer_comment: Optional[str] = None
+    citation_reviews: List[dict] = Field(default_factory=list)
+    reviewed_at: Optional[datetime] = None
+    reviewer_workspace_id: Optional[uuid.UUID] = None
     status: str
     errors: List[str] = Field(default_factory=list)
     created_at: datetime
@@ -255,6 +293,15 @@ def _draft_run_to_record(run: DraftGenerationRun) -> DraftGenerationRunRecord:
         uncertainty_notes=list(run.uncertainty_notes or []),
         compliance_status=run.compliance_status,
         compliance_rationale=run.compliance_rationale,
+        # Human review fields (M4.1)
+        review_status=run.review_status,
+        reviewer_edited_answer=run.reviewer_edited_answer,
+        reviewer_compliance_status=run.reviewer_compliance_status,
+        reviewer_compliance_rationale=run.reviewer_compliance_rationale,
+        reviewer_comment=run.reviewer_comment,
+        citation_reviews=list(run.citation_reviews or []),
+        reviewed_at=run.reviewed_at,
+        reviewer_workspace_id=run.reviewer_workspace_id,
         status=run.status,
         errors=list(run.errors or []),
         created_at=run.created_at,
@@ -389,6 +436,7 @@ class PostgresDraftingRepository(DraftingRepository):
                 uncertainty_notes=[],
                 compliance_status=None,
                 compliance_rationale=None,
+                review_status="pending_review",
                 errors=[],
             )
             session.add(run)
@@ -464,6 +512,68 @@ class PostgresDraftingRepository(DraftingRepository):
             )
             result = await session.execute(stmt)
             return [_draft_run_to_record(r) for r in result.scalars().all()]
+
+    # --- Human Review (M4.1) ---
+
+    async def submit_review(
+        self,
+        workspace_id: uuid.UUID,
+        run_id: uuid.UUID,
+        review_status: str,
+        reviewer_edited_answer: Optional[str],
+        reviewer_compliance_status: Optional[str],
+        reviewer_compliance_rationale: Optional[str],
+        reviewer_comment: str,
+        citation_reviews: List[dict],
+    ) -> DraftGenerationRunRecord:
+        """Submit a human review for a draft run."""
+        async with self._session_factory() as session:
+            run = await session.get(DraftGenerationRun, run_id)
+            if run is None:
+                raise ValueError(f"Draft run {run_id} not found")
+            if run.workspace_id != workspace_id:
+                raise ValueError(f"Draft run {run_id} does not belong to workspace {workspace_id}")
+
+            # Validate review lifecycle transition
+            current_status = run.review_status
+            allowed_transitions = {
+                None: {"approved", "changes_requested"},
+                "pending_review": {"approved", "changes_requested"},
+                "approved": set(),  # Terminal state
+                "changes_requested": {"approved", "changes_requested"},  # Can re-review
+            }
+            if current_status not in allowed_transitions:
+                # Treat unknown as pending_review
+                current_status = "pending_review"
+            if review_status not in allowed_transitions.get(current_status, set()):
+                raise ValueError(
+                    f"Invalid review transition: {current_status} -> {review_status}"
+                )
+
+            run.review_status = review_status
+            if reviewer_edited_answer is not None:
+                run.reviewer_edited_answer = reviewer_edited_answer
+            if reviewer_compliance_status is not None:
+                run.reviewer_compliance_status = reviewer_compliance_status
+            if reviewer_compliance_rationale is not None:
+                run.reviewer_compliance_rationale = reviewer_compliance_rationale
+            run.reviewer_comment = reviewer_comment
+            run.citation_reviews = citation_reviews
+            run.reviewed_at = datetime.now(timezone.utc)
+            run.reviewer_workspace_id = workspace_id
+            await session.commit()
+            await session.refresh(run)
+            return _draft_run_to_record(run)
+
+    async def get_draft_run_for_review(
+        self, workspace_id: uuid.UUID, run_id: uuid.UUID
+    ) -> Optional[DraftGenerationRunRecord]:
+        """Get a draft run for review, enforcing workspace isolation."""
+        async with self._session_factory() as session:
+            run = await session.get(DraftGenerationRun, run_id)
+            if run is None or run.workspace_id != workspace_id:
+                return None
+            return _draft_run_to_record(run)
 
 
 # --- In-Memory Implementation for Tests ---
@@ -579,6 +689,15 @@ class InMemoryDraftingRepository(DraftingRepository):
             uncertainty_notes=[],
             compliance_status=None,
             compliance_rationale=None,
+            # Human review fields (M4.1)
+            review_status="pending_review",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment=None,
+            citation_reviews=[],
+            reviewed_at=None,
+            reviewer_workspace_id=None,
             errors=[],
             created_at=datetime.now(),
             updated_at=datetime.now(),
@@ -634,3 +753,61 @@ class InMemoryDraftingRepository(DraftingRepository):
             r for r in self._draft_runs.values()
             if r.workspace_id == workspace_id and r.requirement_id == requirement_id
         ]
+
+    # --- Human Review (M4.1) ---
+
+    async def submit_review(
+        self,
+        workspace_id: uuid.UUID,
+        run_id: uuid.UUID,
+        review_status: str,
+        reviewer_edited_answer: Optional[str],
+        reviewer_compliance_status: Optional[str],
+        reviewer_compliance_rationale: Optional[str],
+        reviewer_comment: str,
+        citation_reviews: List[dict],
+    ) -> DraftGenerationRunRecord:
+        """Submit a human review for a draft run (in-memory)."""
+        record = self._draft_runs.get(run_id)
+        if record is None:
+            raise ValueError(f"Draft run {run_id} not found")
+        if record.workspace_id != workspace_id:
+            raise ValueError(f"Draft run {run_id} does not belong to workspace {workspace_id}")
+
+        # Validate review lifecycle transition
+        current_status = record.review_status
+        allowed_transitions = {
+            None: {"approved", "changes_requested"},
+            "pending_review": {"approved", "changes_requested"},
+            "approved": set(),
+            "changes_requested": {"approved", "changes_requested"},
+        }
+        if current_status not in allowed_transitions:
+            current_status = "pending_review"
+        if review_status not in allowed_transitions.get(current_status, set()):
+            raise ValueError(
+                f"Invalid review transition: {current_status} -> {review_status}"
+            )
+
+        record.review_status = review_status
+        if reviewer_edited_answer is not None:
+            record.reviewer_edited_answer = reviewer_edited_answer
+        if reviewer_compliance_status is not None:
+            record.reviewer_compliance_status = reviewer_compliance_status
+        if reviewer_compliance_rationale is not None:
+            record.reviewer_compliance_rationale = reviewer_compliance_rationale
+        record.reviewer_comment = reviewer_comment
+        record.citation_reviews = citation_reviews
+        record.reviewed_at = datetime.now(timezone.utc)
+        record.reviewer_workspace_id = workspace_id
+        record.updated_at = datetime.now(timezone.utc)
+        return record
+
+    async def get_draft_run_for_review(
+        self, workspace_id: uuid.UUID, run_id: uuid.UUID
+    ) -> Optional[DraftGenerationRunRecord]:
+        """Get a draft run for review, enforcing workspace isolation (in-memory)."""
+        record = self._draft_runs.get(run_id)
+        if record is None or record.workspace_id != workspace_id:
+            return None
+        return record

@@ -7,6 +7,7 @@ No external AI APIs or database required.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import List
 from unittest.mock import MagicMock
 
@@ -20,11 +21,12 @@ from app.modules.drafting.generation import (
     UncertaintyLevel,
     generate_draft_for_requirement,
 )
+from app.modules.drafting.assessment import ComplianceStatus
 from app.modules.drafting.retrieval import (
     EvidencePassage,
     retrieve_evidence_for_requirement,
 )
-from app.modules.drafting.repository import InMemoryDraftingRepository
+from app.modules.drafting.repository import InMemoryDraftingRepository, DraftGenerationRunRecord
 from app.modules.drafting.service import DraftingResult, draft_for_requirement
 from app.modules.requirements.schema import RequirementRecord
 from app.rag.store import InMemoryVectorStore, SearchResult, VectorRecord
@@ -1045,3 +1047,464 @@ class TestCitationProvenance:
         # Score comes from the retrieved passage, not the model.
         assert draft.citations[0].score == 0.9
         assert draft.evidence_found is True
+
+
+# --- M4.1: Human Review Workflow ---
+
+class TestHumanReviewRepository:
+    """Tests for the human review workflow in the repository."""
+
+    @pytest.mark.asyncio
+    async def test_submit_review_approve(self):
+        """Submitting an 'approve' review sets review_status to 'approved'."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        # Create and complete a draft run
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[EvidenceCitation("chunk_1", "Evidence text", 0.8)],
+            evidence_found=True,
+            uncertainty=UncertaintyLevel.SUPPORTED,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # Submit review: approve
+        updated = await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer="Human edited answer",
+            reviewer_compliance_status="compliant",
+            reviewer_compliance_rationale="Meets all criteria",
+            reviewer_comment="Looks good",
+            citation_reviews=[
+                {"evidence_id": "chunk_1", "decision": "accept", "reason": "Accurate"}
+            ],
+        )
+
+        assert updated.review_status == "approved"
+        assert updated.reviewer_edited_answer == "Human edited answer"
+        assert updated.reviewer_compliance_status == "compliant"
+        assert updated.reviewer_compliance_rationale == "Meets all criteria"
+        assert updated.reviewer_comment == "Looks good"
+        assert len(updated.citation_reviews) == 1
+        assert updated.citation_reviews[0]["decision"] == "accept"
+        assert updated.reviewed_at is not None
+        assert updated.reviewer_workspace_id == ws
+        # Original AI draft preserved
+        assert updated.draft_answer == "AI generated answer"
+
+    @pytest.mark.asyncio
+    async def test_submit_review_request_changes(self):
+        """Submitting a 'request_changes' review sets review_status to 'changes_requested'."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[EvidenceCitation("chunk_1", "Evidence text", 0.8)],
+            evidence_found=True,
+            uncertainty=UncertaintyLevel.SUPPORTED,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        updated = await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="changes_requested",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Need to add more detail",
+            citation_reviews=[
+                {"evidence_id": "chunk_1", "decision": "reject", "reason": "Outdated"}
+            ],
+        )
+
+        assert updated.review_status == "changes_requested"
+        assert updated.reviewer_edited_answer is None
+        assert updated.reviewer_comment == "Need to add more detail"
+        assert updated.citation_reviews[0]["decision"] == "reject"
+
+    @pytest.mark.asyncio
+    async def test_review_lifecycle_transitions(self):
+        """Valid transitions: None -> approved/changes_requested; changes_requested -> approved/changes_requested; approved is terminal."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[EvidenceCitation("chunk_1", "Evidence text", 0.8)],
+            evidence_found=True,
+            uncertainty=UncertaintyLevel.SUPPORTED,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # First review: request changes
+        await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="changes_requested",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="First review",
+            citation_reviews=[],
+        )
+
+        # Second review: approve (valid transition from changes_requested)
+        updated = await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer="Final answer",
+            reviewer_compliance_status="compliant",
+            reviewer_compliance_rationale="Now complete",
+            reviewer_comment="Approved on second review",
+            citation_reviews=[],
+        )
+        assert updated.review_status == "approved"
+
+        # Third review: try to change from approved -> should fail
+        with pytest.raises(ValueError, match="Invalid review transition"):
+            await repo.submit_review(
+                workspace_id=ws,
+                run_id=draft_run.run_id,
+                review_status="changes_requested",
+                reviewer_edited_answer=None,
+                reviewer_compliance_status=None,
+                reviewer_compliance_rationale=None,
+                reviewer_comment="Trying to reopen",
+                citation_reviews=[],
+            )
+
+    @pytest.mark.asyncio
+    async def test_invalid_transition_from_none_to_invalid(self):
+        """Transition from None to invalid status should fail."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        with pytest.raises(ValueError, match="Invalid review transition"):
+            await repo.submit_review(
+                workspace_id=ws,
+                run_id=draft_run.run_id,
+                review_status="invalid_status",
+                reviewer_edited_answer=None,
+                reviewer_compliance_status=None,
+                reviewer_compliance_rationale=None,
+                reviewer_comment="Invalid",
+                citation_reviews=[],
+            )
+
+    @pytest.mark.asyncio
+    async def test_workspace_isolation_on_review(self):
+        """Review enforces workspace isolation."""
+        repo = InMemoryDraftingRepository()
+        ws_a = WS_UUID
+        ws_b = uuid.UUID("550e8400-e29b-41d4-a716-446655440002")
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws_a, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # Try to review from different workspace -> should fail
+        with pytest.raises(ValueError, match="does not belong to workspace"):
+            await repo.submit_review(
+                workspace_id=ws_b,
+                run_id=draft_run.run_id,
+                review_status="approved",
+                reviewer_edited_answer=None,
+                reviewer_compliance_status=None,
+                reviewer_compliance_rationale=None,
+                reviewer_comment="Cross-workspace attempt",
+                citation_reviews=[],
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_draft_run_for_review_workspace_isolation(self):
+        """get_draft_run_for_review enforces workspace isolation."""
+        repo = InMemoryDraftingRepository()
+        ws_a = WS_UUID
+        ws_b = uuid.UUID("550e8400-e29b-41d4-a716-446655440002")
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws_a, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI generated answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty=UncertaintyLevel.NONE,
+            uncertainty_notes=[],
+            evidence_passages=[],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # Same workspace -> returns record
+        found = await repo.get_draft_run_for_review(ws_a, draft_run.run_id)
+        assert found is not None
+        assert found.run_id == draft_run.run_id
+
+        # Different workspace -> returns None
+        not_found = await repo.get_draft_run_for_review(ws_b, draft_run.run_id)
+        assert not_found is None
+
+    @pytest.mark.asyncio
+    async def test_review_preserves_ai_originals(self):
+        """Review stores human edits separately; AI originals unchanged."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        original_answer = "AI says we support SAML 2.0"
+        original_compliance = "needs_review"
+        original_rationale = "AI rationale"
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="The system must support SAML 2.0",
+            draft_answer=original_answer,
+            citations=[EvidenceCitation("chunk_1", "SAML 2.0 supported", 0.9)],
+            evidence_found=True,
+            uncertainty=UncertaintyLevel.SUPPORTED,
+            uncertainty_notes=[],
+            evidence_passages=[],
+            compliance_status=ComplianceStatus.NEEDS_REVIEW,
+            compliance_rationale=original_rationale,
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # Submit review with edits
+        updated = await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer="Human says we support SAML 2.0 and OAuth",
+            reviewer_compliance_status="compliant",
+            reviewer_compliance_rationale="Human verified",
+            reviewer_comment="Updated to include OAuth",
+            citation_reviews=[
+                {"evidence_id": "chunk_1", "decision": "accept", "reason": "Verified"}
+            ],
+        )
+
+        # AI originals preserved
+        assert updated.draft_answer == original_answer
+        assert updated.compliance_status == original_compliance
+        assert updated.compliance_rationale == original_rationale
+        # Human edits stored separately
+        assert updated.reviewer_edited_answer == "Human says we support SAML 2.0 and OAuth"
+        assert updated.reviewer_compliance_status == "compliant"
+        assert updated.reviewer_compliance_rationale == "Human verified"
+
+    @pytest.mark.asyncio
+    async def test_citation_reviews_distinct_from_verification(self):
+        """Citation reviews are stored separately from automated verification results."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+        draft = RequirementDraft(
+            requirement_id=req_id,
+            requirement_key="req_1",
+            requirement_text="Test requirement",
+            draft_answer="AI answer",
+            citations=[
+                EvidenceCitation("chunk_1", "Evidence 1", 0.9),
+                EvidenceCitation("chunk_2", "Evidence 2", 0.8),
+            ],
+            evidence_found=True,
+            uncertainty=UncertaintyLevel.SUPPORTED,
+            uncertainty_notes=[],
+            evidence_passages=[],
+            citation_verifications=[
+                # Mock verification results (M3.3)
+                type("VerificationResult", (), {
+                    "evidence_id": "chunk_1",
+                    "excerpt": "Evidence 1",
+                    "verified": True,
+                    "reason": "verified",
+                    "source_doc_id": "doc_1",
+                    "workspace_id": str(ws),
+                })(),
+                type("VerificationResult", (), {
+                    "evidence_id": "chunk_2",
+                    "excerpt": "Evidence 2",
+                    "verified": False,
+                    "reason": "excerpt_not_found_in_passage",
+                    "source_doc_id": "doc_2",
+                    "workspace_id": str(ws),
+                })(),
+            ],
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+
+        # Submit review with citation decisions (distinct from verification)
+        updated = await repo.submit_review(
+            workspace_id=ws,
+            run_id=draft_run.run_id,
+            review_status="approved",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Citation review done",
+            citation_reviews=[
+                {"evidence_id": "chunk_1", "decision": "accept", "reason": "Confirmed"},
+                {"evidence_id": "chunk_2", "decision": "modify", "reviewer_excerpt": "Corrected excerpt", "reason": "Fixed quote"},
+            ],
+        )
+
+        # Verification results (M3.3) are in citations via _citations_with_verification
+        assert updated.citations[0]["verified"] is True
+        assert updated.citations[1]["verified"] is False
+        # Human citation reviews are separate
+        assert len(updated.citation_reviews) == 2
+        assert updated.citation_reviews[0]["decision"] == "accept"
+        assert updated.citation_reviews[1]["decision"] == "modify"
+        assert updated.citation_reviews[1]["reviewer_excerpt"] == "Corrected excerpt"
+        # A failed verification does NOT mean human cannot accept/modify
+        # Human review is independent of automated verification
+
+
+# --- Regression Tests for Review Status Default ---
+
+class TestReviewStatusDefault:
+    """Regression tests ensuring new drafts default to pending_review and legacy NULL is readable."""
+
+    @pytest.mark.asyncio
+    async def test_new_draft_run_defaults_to_pending_review(self):
+        """Newly created draft runs must have review_status='pending_review'."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        draft_run = await repo.create_draft_run(ws, req_id, evidence_run_id)
+
+        # The created run record should have review_status="pending_review"
+        assert draft_run.review_status == "pending_review"
+        # And all other review fields should be their defaults
+        assert draft_run.reviewer_edited_answer is None
+        assert draft_run.reviewer_compliance_status is None
+        assert draft_run.reviewer_compliance_rationale is None
+        assert draft_run.reviewer_comment is None
+        assert draft_run.citation_reviews == []
+        assert draft_run.reviewed_at is None
+        assert draft_run.reviewer_workspace_id is None
+
+    @pytest.mark.asyncio
+    async def test_legacy_null_review_status_readable(self):
+        """Legacy draft runs with NULL review_status remain readable (defaults applied)."""
+        repo = InMemoryDraftingRepository()
+        ws = WS_UUID
+        req_id = uuid.uuid4()
+        evidence_run_id = uuid.uuid4()
+
+        # Manually create a record simulating a legacy row with review_status=None
+        run_id = uuid.uuid4()
+        legacy_record = DraftGenerationRunRecord(
+            run_id=run_id,
+            workspace_id=ws,
+            requirement_id=req_id,
+            retrieval_run_id=evidence_run_id,
+            status="completed",
+            draft_answer="Legacy answer",
+            citations=[],
+            evidence_found=False,
+            uncertainty="none",
+            uncertainty_notes=[],
+            compliance_status=None,
+            compliance_rationale=None,
+            # Legacy: review_status explicitly None (simulating NULL in DB)
+            review_status=None,
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment=None,
+            citation_reviews=[],
+            reviewed_at=None,
+            reviewer_workspace_id=None,
+            errors=[],
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        repo._draft_runs[run_id] = legacy_record
+
+        # Fetching the legacy record should return it with review_status=None (readable)
+        fetched = await repo.get_draft_run(run_id)
+        assert fetched is not None
+        assert fetched.review_status is None
+        assert fetched.draft_answer == "Legacy answer"
+
+        # But submitting a review should work and transition from None -> approved
+        updated = await repo.submit_review(
+            workspace_id=ws,
+            run_id=run_id,
+            review_status="approved",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Legacy review",
+            citation_reviews=[],
+        )
+        assert updated.review_status == "approved"
