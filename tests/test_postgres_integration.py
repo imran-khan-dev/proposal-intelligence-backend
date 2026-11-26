@@ -28,12 +28,21 @@ from app.core.database import (
 )
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
-from app.modules.drafting.generation import EvidenceCitation
+from app.models.extraction_run import ExtractionRun
+from app.models.requirement import Requirement
+from app.modules.drafting.assessment import ComplianceStatus
+from app.modules.drafting.generation import (
+    EvidenceCitation,
+    RequirementDraft,
+    UncertaintyLevel,
+)
+from app.modules.drafting.repository import PostgresDraftingRepository
 from app.modules.drafting.retrieval import _search_result_to_passage
 from app.modules.drafting.verification import (
     REASON_EVIDENCE_ID_NOT_FOUND,
     REASON_VERIFIED,
     REASON_WRONG_WORKSPACE,
+    CitationVerificationResult,
     verify_citations,
 )
 from app.rag.store import VectorRecord
@@ -392,3 +401,87 @@ class TestCitationVerificationIntegration:
         )
         assert cross[0].verified is False
         assert cross[0].reason == REASON_WRONG_WORKSPACE
+
+
+class TestCompliancePersistenceIntegration:
+    """Compliance assessment persists via the existing repository pattern."""
+
+    async def _make_requirement(self) -> uuid.UUID:
+        factory = get_async_session_factory()
+        async with factory() as session:
+            run = ExtractionRun(
+                workspace_id=WS_A,
+                doc_id="doc1",
+                status="completed",
+                requirement_count=1,
+                errors=[],
+            )
+            session.add(run)
+            await session.flush()
+            req = Requirement(
+                workspace_id=WS_A,
+                run_id=run.id,
+                requirement_key="doc1:p1:1-10",
+                doc_id="doc1",
+                text="The system must support SAML 2.0 single sign-on.",
+                page_number=1,
+                character_start=1,
+                character_end=10,
+                modality="mandatory",
+                category="security",
+                confidence=0.9,
+                extraction_method="rule",
+            )
+            session.add(req)
+            await session.commit()
+            return req.id
+
+    async def test_compliance_persisted_and_older_records_readable(
+        self, db_engine, clean_tables
+    ):
+        requirement_id = await self._make_requirement()
+        repo = PostgresDraftingRepository()
+
+        # Unassessed record remains readable (NULL compliance).
+        run = await repo.create_draft_run(WS_A, requirement_id, None)
+        fetched = await repo.get_draft_run(run.run_id)
+        assert fetched is not None
+        assert fetched.compliance_status is None
+
+        # Complete with an assessment.
+        draft = RequirementDraft(
+            requirement_id=requirement_id,
+            requirement_key="doc1:p1:1-10",
+            requirement_text="The system must support SAML 2.0 single sign-on.",
+            draft_answer="We support SAML 2.0 single sign-on.",
+            citations=[EvidenceCitation("chunk_1", "SAML 2.0 single sign-on", 0.9)],
+            evidence_found=True,
+            uncertainty=UncertaintyLevel.SUPPORTED,
+            uncertainty_notes=[],
+            evidence_passages=[],
+            citation_verifications=[
+                CitationVerificationResult(
+                    evidence_id="chunk_1",
+                    excerpt="SAML 2.0 single sign-on",
+                    verified=True,
+                    reason=REASON_VERIFIED,
+                    source_doc_id="comp_doc",
+                    workspace_id=str(WS_A),
+                )
+            ],
+            compliance_status=ComplianceStatus.COMPLIANT,
+            compliance_rationale="Verified evidence meets the requirement.",
+        )
+        await repo.complete_draft_run(run.run_id, draft)
+
+        stored = await repo.get_draft_run(run.run_id)
+        assert stored is not None
+        assert stored.compliance_status == "compliant"
+        assert stored.compliance_rationale == "Verified evidence meets the requirement."
+        # Citations (with verification) and answer preserved.
+        assert stored.draft_answer == "We support SAML 2.0 single sign-on."
+        assert stored.citations[0]["verified"] is True
+
+        # Workspace isolation: another workspace cannot read this run.
+        other = await repo.get_latest_draft_run(WS_B, requirement_id)
+        assert other is None

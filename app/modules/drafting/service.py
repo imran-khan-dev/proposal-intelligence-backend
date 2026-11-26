@@ -23,6 +23,7 @@ from app.modules.drafting.retrieval import (
     EvidencePassage,
     retrieve_evidence_for_requirement,
 )
+from app.modules.drafting.assessment import assess_requirement_compliance
 from app.modules.drafting.verification import verify_citations
 from app.modules.requirements.schema import RequirementRecord
 from app.rag.store import VectorStore
@@ -116,6 +117,12 @@ async def draft_for_requirement(
     draft.citation_verifications = verify_citations(
         draft.citations, passages, workspace_id
     )
+
+    # Assign a conservative compliance status from verified evidence only
+    # (M3.4). Never mutates the draft answer, citations, or verifications.
+    assessment = assess_requirement_compliance(draft, provider)
+    draft.compliance_status = assessment.status
+    draft.compliance_rationale = assessment.rationale
 
     return DraftingResult(
         requirement=requirement,

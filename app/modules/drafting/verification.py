@@ -8,8 +8,8 @@ For every citation it verifies all of the following:
 
 * the ``evidence_id`` belongs to the evidence retrieved for the requirement;
 * the cited ``excerpt`` is an exact substring of the stored source passage;
-* the source passage belongs to the current workspace (when the passage
-  carries workspace metadata);
+* the source passage belongs to the current workspace (it must carry workspace
+  metadata and that metadata must match the current workspace);
 * the source passage is company knowledge, not an RFP source.
 
 A per-citation result (``verified`` / ``failed`` plus a concise reason) is
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 REASON_VERIFIED = "verified"
 REASON_EVIDENCE_ID_NOT_FOUND = "evidence_id not among retrieved evidence"
 REASON_EXCERPT_NOT_IN_PASSAGE = "excerpt not found in source passage"
+REASON_WORKSPACE_UNKNOWN = "evidence has no workspace metadata"
 REASON_WRONG_WORKSPACE = "evidence belongs to another workspace"
 REASON_RFP_SOURCE = "citation points to an RFP source, not company knowledge"
 REASON_NOT_COMPANY_KNOWLEDGE = "source is not company knowledge"
@@ -97,10 +98,19 @@ def _verify_single(
             workspace_id=passage_ws,
         )
 
-    # Workspace isolation: when the passage records a workspace, it must match
-    # the current one. (Passages without workspace metadata are accepted
-    # because retrieval is already workspace-scoped.)
-    if passage_ws is not None and str(passage_ws) != str(workspace_id):
+    # Workspace isolation: the passage must record a workspace and it must
+    # match the current one. A passage without workspace metadata cannot be
+    # confirmed to belong to this workspace, so it fails verification.
+    if passage_ws is None:
+        return CitationVerificationResult(
+            evidence_id=evidence_id,
+            excerpt=excerpt,
+            verified=False,
+            reason=REASON_WORKSPACE_UNKNOWN,
+            source_doc_id=source_doc_id,
+            workspace_id=passage_ws,
+        )
+    if str(passage_ws) != str(workspace_id):
         return CitationVerificationResult(
             evidence_id=evidence_id,
             excerpt=excerpt,

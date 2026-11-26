@@ -173,6 +173,8 @@ class DraftGenerationRunRecord(BaseModel):
     evidence_found: bool
     uncertainty: str
     uncertainty_notes: List[str] = Field(default_factory=list)
+    compliance_status: Optional[str] = None
+    compliance_rationale: Optional[str] = None
     status: str
     errors: List[str] = Field(default_factory=list)
     created_at: datetime
@@ -251,6 +253,8 @@ def _draft_run_to_record(run: DraftGenerationRun) -> DraftGenerationRunRecord:
         evidence_found=run.evidence_found,
         uncertainty=run.uncertainty,
         uncertainty_notes=list(run.uncertainty_notes or []),
+        compliance_status=run.compliance_status,
+        compliance_rationale=run.compliance_rationale,
         status=run.status,
         errors=list(run.errors or []),
         created_at=run.created_at,
@@ -263,8 +267,8 @@ def _draft_run_to_record(run: DraftGenerationRun) -> DraftGenerationRunRecord:
 class PostgresDraftingRepository(DraftingRepository):
     """PostgreSQL-backed repository using the shared async engine."""
 
-    def __init__(self) -> None:
-        self._session_factory = get_async_session_factory()
+    def __init__(self, session_factory=None) -> None:
+        self._session_factory = session_factory or get_async_session_factory()
 
     # Evidence Retrieval Runs
 
@@ -383,6 +387,8 @@ class PostgresDraftingRepository(DraftingRepository):
                 evidence_found=False,
                 uncertainty="none",
                 uncertainty_notes=[],
+                compliance_status=None,
+                compliance_rationale=None,
                 errors=[],
             )
             session.add(run)
@@ -404,6 +410,12 @@ class PostgresDraftingRepository(DraftingRepository):
                 run.evidence_found = draft.evidence_found
                 run.uncertainty = draft.uncertainty.value
                 run.uncertainty_notes = list(draft.uncertainty_notes)
+                run.compliance_status = (
+                    draft.compliance_status.value
+                    if draft.compliance_status is not None
+                    else None
+                )
+                run.compliance_rationale = draft.compliance_rationale
                 await session.commit()
 
     async def fail_draft_run(self, run_id: uuid.UUID, errors: List[str]) -> None:
@@ -565,6 +577,8 @@ class InMemoryDraftingRepository(DraftingRepository):
             evidence_found=False,
             uncertainty="none",
             uncertainty_notes=[],
+            compliance_status=None,
+            compliance_rationale=None,
             errors=[],
             created_at=datetime.now(),
             updated_at=datetime.now(),
@@ -585,6 +599,12 @@ class InMemoryDraftingRepository(DraftingRepository):
             record.evidence_found = draft.evidence_found
             record.uncertainty = draft.uncertainty.value
             record.uncertainty_notes = list(draft.uncertainty_notes)
+            record.compliance_status = (
+                draft.compliance_status.value
+                if draft.compliance_status is not None
+                else None
+            )
+            record.compliance_rationale = draft.compliance_rationale
             record.updated_at = datetime.now()
 
     async def fail_draft_run(self, run_id: uuid.UUID, errors: List[str]) -> None:

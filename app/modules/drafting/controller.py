@@ -30,6 +30,7 @@ from app.modules.drafting.retrieval import (
     _build_retrieval_query,
     retrieve_evidence_for_requirement,
 )
+from app.modules.drafting.assessment import assess_requirement_compliance
 from app.modules.drafting.verification import verify_citations
 from app.modules.requirements.repository import PostgresRequirementRepository
 from app.modules.requirements.service import list_requirements
@@ -202,6 +203,12 @@ async def start_drafting_controller(
                 draft.citations, passages, ws_uuid
             )
 
+            # Assign a conservative compliance status from verified evidence
+            # only (M3.4). The draft answer and verifications are preserved.
+            assessment = assess_requirement_compliance(draft, provider)
+            draft.compliance_status = assessment.status
+            draft.compliance_rationale = assessment.rationale
+
             # Complete draft run
             await drafting_repo.complete_draft_run(
                 run_id=draft_run.run_id,
@@ -285,6 +292,9 @@ async def list_drafts_controller(
                         citation_verifications=_citation_verifications_from_stored(
                             draft_run.citations
                         ),
+                        compliance_status=draft_run.compliance_status or "needs_review",
+                        compliance_rationale=draft_run.compliance_rationale
+                        or "Assessment not available for this draft.",
                     )
                 )
         except Exception as exc:
@@ -383,6 +393,9 @@ async def get_draft_controller(
             citation_verifications=_citation_verifications_from_stored(
                 draft_run.citations
             ),
+            compliance_status=draft_run.compliance_status or "needs_review",
+            compliance_rationale=draft_run.compliance_rationale
+            or "Assessment not available for this draft.",
         )
     else:
         draft_response = RequirementDraftResponse(
@@ -394,6 +407,8 @@ async def get_draft_controller(
             evidence_found=False,
             uncertainty="none",
             uncertainty_notes=["Draft not yet generated - use POST /api/drafting/start"],
+            compliance_status="needs_review",
+            compliance_rationale="Draft not yet generated - use POST /api/drafting/start",
         )
 
     return SingleDraftResponse(

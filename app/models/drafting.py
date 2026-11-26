@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -255,6 +255,16 @@ class DraftGenerationRun(Base):
         JSONB,
         nullable=False,
         default=list,
+    )
+    # Requirement-level compliance assessment (M3.4). Nullable so older draft
+    # records without an assessment remain readable (treated as needs_review).
+    compliance_status: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    compliance_rationale: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
     )
     # pending | running | completed | failed
     status: Mapped[str] = mapped_column(

@@ -57,6 +57,13 @@ class RequirementDraftResponse(BaseModel):
         default_factory=list,
         description="Independent per-citation verification results",
     )
+    compliance_status: Optional[str] = Field(
+        None,
+        description="Requirement compliance: compliant|partially_compliant|non_compliant|needs_review",
+    )
+    compliance_rationale: Optional[str] = Field(
+        None, description="Concise rationale for the compliance status"
+    )
 
 
 class DraftGenerationRunRecord(BaseModel):
@@ -71,6 +78,10 @@ class DraftGenerationRunRecord(BaseModel):
     evidence_found: bool = Field(..., description="Whether evidence was found")
     uncertainty: str = Field(..., description="Uncertainty level")
     uncertainty_notes: List[str] = Field(default_factory=list, description="Uncertainty notes")
+    compliance_status: Optional[str] = Field(
+        None, description="compliant|partially_compliant|non_compliant|needs_review"
+    )
+    compliance_rationale: Optional[str] = Field(None, description="Assessment rationale")
     status: str = Field(..., description="pending|running|completed|failed")
     errors: List[str] = Field(default_factory=list, description="Errors from the run")
     created_at: datetime = Field(..., description="Creation timestamp")

@@ -19,12 +19,15 @@ from app.modules.drafting.generation import (
 )
 from app.modules.drafting.retrieval import EvidencePassage
 from app.modules.drafting.service import draft_for_requirement
+from app.modules.drafting.controller import _citation_verifications_from_stored
+from app.modules.drafting.repository import InMemoryDraftingRepository
 from app.modules.drafting.verification import (
     REASON_EVIDENCE_ID_NOT_FOUND,
     REASON_EXCERPT_NOT_IN_PASSAGE,
     REASON_NOT_COMPANY_KNOWLEDGE,
     REASON_RFP_SOURCE,
     REASON_VERIFIED,
+    REASON_WORKSPACE_UNKNOWN,
     REASON_WRONG_WORKSPACE,
     verify_citations,
 )
@@ -105,12 +108,13 @@ class TestVerifyCitations:
         assert results[0].verified is False
         assert results[0].reason == REASON_NOT_COMPANY_KNOWLEDGE
 
-    def test_absent_workspace_metadata_passes(self):
-        # No workspace metadata -> accepted (retrieval is workspace-scoped).
+    def test_missing_workspace_metadata_fails(self):
+        # No workspace metadata -> cannot confirm workspace ownership -> fail.
         results = verify_citations(
             [_citation()], [_passage(workspace_id=None)], WS_A
         )
-        assert results[0].verified is True
+        assert results[0].verified is False
+        assert results[0].reason == REASON_WORKSPACE_UNKNOWN
 
     def test_no_citations_returns_empty(self):
         assert verify_citations([], [_passage()], WS_A) == []
@@ -262,3 +266,71 @@ class TestServiceAttachesVerification:
 
         assert result.draft.citation_verifications == []
         assert result.draft.evidence_found is False
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_metadata_fails_and_is_exposed(self):
+        """Missing workspace metadata fails verification; the draft answer and
+        citation are preserved and the failure is exposed via storage/API."""
+        query = "The system must support SAML 2.0 single sign-on."
+        store = InMemoryVectorStore()
+        # Company-knowledge chunk WITHOUT workspace_id metadata.
+        store.add([
+            VectorRecord(
+                id="chunk_1",
+                text="Our platform supports SAML 2.0 single sign-on for enterprise customers.",
+                embedding=[0.0, 1.0, 0.0, 0.0],
+                metadata={
+                    "doc_id": "comp_doc",
+                    "chunk_index": 0,
+                    "source_filename": "company.pdf",
+                    "source_type": "company_knowledge",
+                },
+            )
+        ])
+        embedder = _ControlledEmbedder({query: [1.0, 0.0, 0.0, 0.0]})
+        provider = _StubProvider({
+            "draft_answer": "We support SAML 2.0 single sign-on.",
+            "citations": [
+                {"evidence_id": "chunk_1",
+                 "excerpt": "SAML 2.0 single sign-on", "score": 0.9}
+            ],
+            "evidence_found": True,
+            "uncertainty": "supported",
+            "uncertainty_notes": [],
+        })
+
+        result = await draft_for_requirement(
+            requirement=_make_requirement(),
+            workspace_id=WS_A,
+            embedder=embedder,
+            store=store,
+            provider=provider,
+            top_k=5,
+        )
+
+        # Draft answer and citation are preserved.
+        assert result.draft.draft_answer == "We support SAML 2.0 single sign-on."
+        assert len(result.draft.citations) == 1
+        # Verification fails with the workspace-unknown reason.
+        assert len(result.draft.citation_verifications) == 1
+        assert result.draft.citation_verifications[0].verified is False
+        assert result.draft.citation_verifications[0].reason == REASON_WORKSPACE_UNKNOWN
+
+        # Persist through the storage path and confirm the failure is stored.
+        repo = InMemoryDraftingRepository()
+        req_id = uuid.uuid4()
+        run = await repo.create_draft_run(WS_A, req_id, None)
+        await repo.complete_draft_run(run.run_id, result.draft)
+        stored = await repo.get_draft_run(run.run_id)
+        assert stored is not None
+        assert stored.draft_answer == "We support SAML 2.0 single sign-on."
+        assert len(stored.citations) == 1
+        assert stored.citations[0]["verified"] is False
+        assert stored.citations[0]["reason"] == REASON_WORKSPACE_UNKNOWN
+
+        # Exposed through the API response builder.
+        exposed = _citation_verifications_from_stored(stored.citations)
+        assert len(exposed) == 1
+        assert exposed[0].verified is False
+        assert exposed[0].reason == REASON_WORKSPACE_UNKNOWN
+        assert exposed[0].evidence_id == "chunk_1"

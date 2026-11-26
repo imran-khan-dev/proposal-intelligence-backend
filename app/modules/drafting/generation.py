@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from app.modules.drafting.verification import CitationVerificationResult
+    from app.modules.drafting.assessment import ComplianceStatus
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,10 @@ class RequirementDraft:
     citation_verifications: List["CitationVerificationResult"] = field(
         default_factory=list
     )
+    # Requirement-level compliance assessment (M3.4). Populated by the
+    # assessment step after verification; ``None`` when not yet assessed.
+    compliance_status: Optional["ComplianceStatus"] = None
+    compliance_rationale: Optional[str] = None
 
 
 # System prompt for draft generation
