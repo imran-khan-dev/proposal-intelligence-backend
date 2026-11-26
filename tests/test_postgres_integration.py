@@ -28,6 +28,14 @@ from app.core.database import (
 )
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
+from app.modules.drafting.generation import EvidenceCitation
+from app.modules.drafting.retrieval import _search_result_to_passage
+from app.modules.drafting.verification import (
+    REASON_EVIDENCE_ID_NOT_FOUND,
+    REASON_VERIFIED,
+    REASON_WRONG_WORKSPACE,
+    verify_citations,
+)
 from app.rag.store import VectorRecord
 from app.rag.stores.postgres_vector_store import PostgreSQLVectorStore
 
@@ -301,3 +309,86 @@ class TestPostgresSourceTypeFilter:
         assert all(
             r.record.metadata["workspace_id"] == str(WS_B) for r in company_b
         )
+
+
+class _FixedEmbedder:
+    """Embedder returning a constant vector (dimension 384)."""
+
+    dimension = 384
+
+    def embed(self, texts):
+        return [[0.1] * 384 for _ in texts]
+
+
+class TestCitationVerificationIntegration:
+    """End-to-end citation verification against real PostgreSQL evidence."""
+
+    async def test_company_citation_verified_rfp_and_cross_ws_fail(
+        self, db_engine, clean_tables
+    ):
+        store_a = PostgreSQLVectorStore(workspace_id=WS_A)
+        store_b = PostgreSQLVectorStore(workspace_id=WS_B)
+
+        await store_a.async_add(
+            _make_typed_records(
+                "a-comp", WS_A, "company_knowledge",
+                "company capability text about SAML single sign-on",
+            )
+        )
+        await store_a.async_add(
+            _make_typed_records(
+                "a-rfp", WS_A, "rfp", "rfp requirement text about SAML"
+            )
+        )
+        await store_b.async_add(
+            _make_typed_records(
+                "b-comp", WS_B, "company_knowledge",
+                "workspace B company capability text",
+            )
+        )
+
+        embedder = _FixedEmbedder()
+
+        async def _company_passages(store):
+            q = embedder.embed(["company capability SAML single sign-on"])[0]
+            results = await store.async_search(
+                q, k=5, source_type="company_knowledge"
+            )
+            return [
+                _search_result_to_passage(r, i + 1) for i, r in enumerate(results)
+            ]
+
+        # Retrieval is company-knowledge only, scoped to workspace A.
+        passages_a = await _company_passages(store_a)
+        assert [p.source_doc_id for p in passages_a] == ["a-comp"]
+        company_chunk_id = passages_a[0].chunk_id
+        assert passages_a[0].metadata.get("workspace_id") == str(WS_A)
+
+        # A valid company-knowledge citation verifies.
+        ok = verify_citations(
+            [EvidenceCitation(company_chunk_id, "SAML single sign-on", 0.1)],
+            passages_a,
+            WS_A,
+        )
+        assert len(ok) == 1 and ok[0].verified is True
+        assert ok[0].reason == REASON_VERIFIED
+
+        # A citation to the RFP chunk is not among retrieved evidence -> fails.
+        rfp = verify_citations(
+            [EvidenceCitation("a-rfp_chunk_0", "rfp requirement text", 0.1)],
+            passages_a,
+            WS_A,
+        )
+        assert rfp[0].verified is False
+        assert rfp[0].reason == REASON_EVIDENCE_ID_NOT_FOUND
+
+        # Cross-workspace: a WS_B passage verified against WS_A fails.
+        passages_b = await _company_passages(store_b)
+        assert [p.source_doc_id for p in passages_b] == ["b-comp"]
+        cross = verify_citations(
+            [EvidenceCitation(passages_b[0].chunk_id, "company capability", 0.1)],
+            passages_b,
+            WS_A,
+        )
+        assert cross[0].verified is False
+        assert cross[0].reason == REASON_WRONG_WORKSPACE

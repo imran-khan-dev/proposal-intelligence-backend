@@ -181,6 +181,31 @@ class DraftGenerationRunRecord(BaseModel):
 
 # --- Conversion Helpers ---
 
+def _citations_with_verification(draft: RequirementDraft) -> List[dict]:
+    """Serialize citations enriched with their verification outcome (M3.3).
+
+    Each stored citation dict carries ``evidence_id``, ``excerpt``, ``score``
+    plus the independent verification ``verified``/``reason``/``source_doc_id``
+    so failed citations are persisted and reported rather than discarded.
+    """
+    verification_by_id = {
+        v.evidence_id: v for v in (draft.citation_verifications or [])
+    }
+    serialized: List[dict] = []
+    for c in draft.citations:
+        verification = verification_by_id.get(c.evidence_id)
+        serialized.append(
+            {
+                "evidence_id": c.evidence_id,
+                "excerpt": c.excerpt,
+                "score": c.score,
+                "verified": verification.verified if verification else None,
+                "reason": verification.reason if verification else None,
+                "source_doc_id": verification.source_doc_id if verification else None,
+            }
+        )
+    return serialized
+
 def _evidence_run_to_record(run: EvidenceRetrievalRun) -> EvidenceRetrievalRunRecord:
     return EvidenceRetrievalRunRecord(
         run_id=run.id,
@@ -375,14 +400,7 @@ class PostgresDraftingRepository(DraftingRepository):
             if run is not None:
                 run.status = "completed"
                 run.draft_answer = draft.draft_answer
-                run.citations = [
-                    {
-                        "evidence_id": c.evidence_id,
-                        "excerpt": c.excerpt,
-                        "score": c.score,
-                    }
-                    for c in draft.citations
-                ]
+                run.citations = _citations_with_verification(draft)
                 run.evidence_found = draft.evidence_found
                 run.uncertainty = draft.uncertainty.value
                 run.uncertainty_notes = list(draft.uncertainty_notes)
@@ -563,10 +581,7 @@ class InMemoryDraftingRepository(DraftingRepository):
         if record:
             record.status = "completed"
             record.draft_answer = draft.draft_answer
-            record.citations = [
-                {"evidence_id": c.evidence_id, "excerpt": c.excerpt, "score": c.score}
-                for c in draft.citations
-            ]
+            record.citations = _citations_with_verification(draft)
             record.evidence_found = draft.evidence_found
             record.uncertainty = draft.uncertainty.value
             record.uncertainty_notes = list(draft.uncertainty_notes)

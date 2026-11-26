@@ -31,6 +31,17 @@ class EvidenceCitationResponse(BaseModel):
     score: float = Field(..., description="Similarity score of the evidence")
 
 
+class CitationVerificationResponse(BaseModel):
+    """Independent per-citation verification outcome (M3.3)."""
+
+    evidence_id: str = Field(..., description="Citation evidence ID (chunk_id)")
+    excerpt: str = Field(..., description="Cited excerpt")
+    verified: bool = Field(..., description="Whether all verification checks passed")
+    reason: str = Field(..., description="Concise verification reason")
+    source_doc_id: Optional[str] = Field(None, description="Matched source document ID")
+    workspace_id: Optional[str] = Field(None, description="Workspace recorded on the source passage")
+
+
 class RequirementDraftResponse(BaseModel):
     """A draft response for a single requirement with evidence citations."""
 
@@ -42,6 +53,10 @@ class RequirementDraftResponse(BaseModel):
     evidence_found: bool = Field(..., description="Whether supporting evidence was found")
     uncertainty: str = Field(..., description="Uncertainty level: supported|weak|none|conflicting")
     uncertainty_notes: List[str] = Field(default_factory=list, description="Notes about gaps or conflicts")
+    citation_verifications: List[CitationVerificationResponse] = Field(
+        default_factory=list,
+        description="Independent per-citation verification results",
+    )
 
 
 class DraftGenerationRunRecord(BaseModel):

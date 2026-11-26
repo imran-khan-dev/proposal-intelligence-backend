@@ -14,6 +14,7 @@ from app.ai.error_handling import handle_ai_exception
 from app.core.workspace import resolve_workspace_id, workspace_id_str
 from app.modules.drafting.repository import PostgresDraftingRepository
 from app.modules.drafting.schema import (
+    CitationVerificationResponse,
     DraftListResponse,
     DraftingStatusResponse,
     EvidenceCitationResponse,
@@ -29,6 +30,7 @@ from app.modules.drafting.retrieval import (
     _build_retrieval_query,
     retrieve_evidence_for_requirement,
 )
+from app.modules.drafting.verification import verify_citations
 from app.modules.requirements.repository import PostgresRequirementRepository
 from app.modules.requirements.service import list_requirements
 from app.rag.store_factory import get_vector_store
@@ -55,6 +57,29 @@ def _scoped_store(workspace_id: uuid.UUID):
     if isinstance(store, PostgreSQLVectorStore):
         store = PostgreSQLVectorStore(workspace_id=workspace_id)
     return store
+
+
+def _citation_verifications_from_stored(citations: list) -> List[CitationVerificationResponse]:
+    """Build verification responses from persisted citation dicts (M3.3).
+
+    Citations stored before verification ran (no ``verified`` key) yield an
+    empty list so legacy drafts remain readable.
+    """
+    results: List[CitationVerificationResponse] = []
+    for c in citations or []:
+        if not isinstance(c, dict) or c.get("verified") is None:
+            continue
+        results.append(
+            CitationVerificationResponse(
+                evidence_id=c.get("evidence_id", ""),
+                excerpt=c.get("excerpt", ""),
+                verified=bool(c.get("verified")),
+                reason=c.get("reason", ""),
+                source_doc_id=c.get("source_doc_id"),
+                workspace_id=c.get("workspace_id"),
+            )
+        )
+    return results
 
 
 async def start_drafting_controller(
@@ -170,6 +195,13 @@ async def start_drafting_controller(
                 provider=provider,
             )
 
+            # Independently verify citations against the retrieved evidence
+            # (M3.3). Runs after generation; the draft answer is preserved and
+            # failed citations are reported, not discarded.
+            draft.citation_verifications = verify_citations(
+                draft.citations, passages, ws_uuid
+            )
+
             # Complete draft run
             await drafting_repo.complete_draft_run(
                 run_id=draft_run.run_id,
@@ -250,6 +282,9 @@ async def list_drafts_controller(
                         evidence_found=draft_run.evidence_found,
                         uncertainty=draft_run.uncertainty,
                         uncertainty_notes=draft_run.uncertainty_notes,
+                        citation_verifications=_citation_verifications_from_stored(
+                            draft_run.citations
+                        ),
                     )
                 )
         except Exception as exc:
@@ -345,6 +380,9 @@ async def get_draft_controller(
             evidence_found=draft_run.evidence_found,
             uncertainty=draft_run.uncertainty,
             uncertainty_notes=draft_run.uncertainty_notes,
+            citation_verifications=_citation_verifications_from_stored(
+                draft_run.citations
+            ),
         )
     else:
         draft_response = RequirementDraftResponse(

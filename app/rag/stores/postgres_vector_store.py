@@ -147,12 +147,20 @@ class PostgreSQLVectorStore(VectorStore):
             )
 
     def _record_to_vector_record(self, chunk: DocumentChunk) -> VectorRecord:
-        """Convert a DocumentChunk to a VectorRecord."""
+        """Convert a DocumentChunk to a VectorRecord.
+
+        The chunk's ``workspace_id`` column is merged into the record metadata
+        (when not already present) so downstream consumers such as citation
+        verification can confirm workspace provenance from search results.
+        """
+        metadata = dict(chunk.chunk_metadata or {})
+        if chunk.workspace_id is not None and "workspace_id" not in metadata:
+            metadata["workspace_id"] = str(chunk.workspace_id)
         return VectorRecord(
             id=str(chunk.id),
             text=chunk.text,
             embedding=list(chunk.embedding),
-            metadata=chunk.chunk_metadata,
+            metadata=metadata,
         )
 
     # --- Async methods (primary implementation) ---

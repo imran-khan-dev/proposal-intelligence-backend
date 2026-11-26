@@ -23,6 +23,7 @@ from app.modules.drafting.retrieval import (
     EvidencePassage,
     retrieve_evidence_for_requirement,
 )
+from app.modules.drafting.verification import verify_citations
 from app.modules.requirements.schema import RequirementRecord
 from app.rag.store import VectorStore
 from app.rag.store_factory import get_vector_store
@@ -108,6 +109,12 @@ async def draft_for_requirement(
         section_title=requirement.section_title,
         category=requirement.category.value if hasattr(requirement.category, 'value') else str(requirement.category),
         provider=provider,
+    )
+
+    # Independently verify each citation against the retrieved evidence
+    # (M3.3). This runs after generation and never alters the draft answer.
+    draft.citation_verifications = verify_citations(
+        draft.citations, passages, workspace_id
     )
 
     return DraftingResult(

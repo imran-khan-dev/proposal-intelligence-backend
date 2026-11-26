@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from app.ai.factory import get_rfp_provider
 from app.ai.provider import AIProvider
 from app.modules.drafting.retrieval import EvidencePassage, retrieve_evidence_for_requirement
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from app.modules.drafting.verification import CitationVerificationResult
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,11 @@ class RequirementDraft:
     uncertainty_notes: List[str]
     # The evidence passages used (for persistence)
     evidence_passages: List[EvidencePassage]
+    # Independent per-citation verification results (M3.3). Populated by the
+    # verification step after generation; empty when verification has not run.
+    citation_verifications: List["CitationVerificationResult"] = field(
+        default_factory=list
+    )
 
 
 # System prompt for draft generation
