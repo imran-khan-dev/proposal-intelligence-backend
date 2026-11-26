@@ -160,6 +160,7 @@ async def ingest_document_controller(
             pages=pages,
             source_filename=source_filename,
             workspace_id=ws_str,
+            source_type="rfp",
         )
     except ValueError as exc:
         logger.warning("Document ingestion validation failed: %s", exc)

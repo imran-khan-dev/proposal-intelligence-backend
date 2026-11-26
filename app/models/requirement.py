@@ -20,6 +20,7 @@ from app.models.tenant import Base
 
 if TYPE_CHECKING:
     from app.models.extraction_run import ExtractionRun
+    from app.models.drafting import DraftGenerationRun, EvidenceRetrievalRun
 
 
 class Requirement(Base):
@@ -124,6 +125,18 @@ class Requirement(Base):
     run: Mapped["ExtractionRun"] = relationship(
         "ExtractionRun",
         back_populates="requirements",
+    )
+    evidence_runs: Mapped[list["EvidenceRetrievalRun"]] = relationship(
+        "EvidenceRetrievalRun",
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    draft_runs: Mapped[list["DraftGenerationRun"]] = relationship(
+        "DraftGenerationRun",
+        back_populates="requirement",
+        cascade="all, delete-orphan",
+        lazy="selectin",
     )
 
     # Stable per (run, requirement_key): re-extraction replaces cleanly.

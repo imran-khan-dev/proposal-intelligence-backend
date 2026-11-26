@@ -41,6 +41,16 @@ class Document(Base):
         String(255),
         nullable=False,
     )
+    # Distinguishes document categories sharing the same workspace-scoped
+    # vector store (e.g. ``"rfp"`` vs ``"company_knowledge"``).  Requirement
+    # drafting only retrieves ``company_knowledge`` documents.
+    source_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="rfp",
+        server_default="rfp",
+        index=True,
+    )
     title: Mapped[Optional[str]] = mapped_column(
         String(500),
         nullable=True,

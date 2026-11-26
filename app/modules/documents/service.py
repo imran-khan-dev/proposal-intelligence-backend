@@ -88,6 +88,7 @@ def ingest_document_from_text(
     pages: Optional[List[dict]] = None,
     source_filename: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    source_type: str = "rfp",
 ) -> int:
     """Validate and ingest document text into a vector store (sync version).
 
@@ -109,6 +110,8 @@ def ingest_document_from_text(
         source_filename: Original filename of the source document.
         workspace_id: Workspace identifier for isolation, stored in chunk
             metadata.
+        source_type: Document category (e.g. ``"rfp"`` or
+            ``"company_knowledge"``). Defaults to ``"rfp"``.
 
     Returns:
         Number of chunks ingested.
@@ -128,6 +131,7 @@ def ingest_document_from_text(
         pages=pages,
         source_filename=source_filename,
         workspace_id=workspace_id,
+        source_type=source_type,
     )
 
 
@@ -142,6 +146,7 @@ async def async_ingest_document_from_text(
     pages: Optional[List[dict]] = None,
     source_filename: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    source_type: str = "rfp",
 ) -> int:
     """Validate and ingest document text into a vector store (async version).
 
@@ -161,6 +166,8 @@ async def async_ingest_document_from_text(
         source_filename: Original filename of the source document.
         workspace_id: Workspace identifier for isolation, stored in chunk
             metadata.
+        source_type: Document category (e.g. ``"rfp"`` or
+            ``"company_knowledge"``). Defaults to ``"rfp"``.
 
     Returns:
         Number of chunks ingested.
@@ -180,6 +187,7 @@ async def async_ingest_document_from_text(
         pages=pages,
         source_filename=source_filename,
         workspace_id=workspace_id,
+        source_type=source_type,
     )
 
 

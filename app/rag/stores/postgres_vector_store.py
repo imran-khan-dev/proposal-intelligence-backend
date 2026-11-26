@@ -116,7 +116,7 @@ class PostgreSQLVectorStore(VectorStore):
         return tenant
 
     async def _get_or_create_document(
-        self, session, doc_id: str
+        self, session, doc_id: str, source_type: str = "rfp"
     ) -> Document:
         """Get or create a document for the given doc_id within this workspace."""
         stmt = select(Document).where(
@@ -131,6 +131,7 @@ class PostgreSQLVectorStore(VectorStore):
                 workspace_id=self._workspace_id,
                 doc_id=doc_id,
                 tenant_id=self._workspace_id,
+                source_type=source_type,
             )
             session.add(document)
             await session.flush()
@@ -183,7 +184,13 @@ class PostgreSQLVectorStore(VectorStore):
             await self._get_or_create_tenant(session)
 
             for doc_id, doc_records in records_by_doc.items():
-                document = await self._get_or_create_document(session, doc_id)
+                # Source type is a document-level property; take it from the
+                # first chunk's metadata (defaults to ``"rfp"`` so RFP
+                # ingestion is never misclassified as company knowledge).
+                source_type = doc_records[0].metadata.get("source_type", "rfp")
+                document = await self._get_or_create_document(
+                    session, doc_id, source_type=source_type
+                )
 
                 # Delete existing chunks for this document
                 await session.execute(
@@ -208,11 +215,14 @@ class PostgreSQLVectorStore(VectorStore):
             await session.commit()
 
     async def async_search(
-        self, query_embedding: List[float], k: int = 5
+        self, query_embedding: List[float], k: int = 5,
+        source_type: Optional[str] = None,
     ) -> List[SearchResult]:
         """Search for the top-k most similar records using pgvector cosine similarity.
 
-        Results are scoped to this store's workspace.
+        Results are scoped to this store's workspace. When ``source_type`` is
+        set, results are additionally restricted to documents of that category
+        so requirement drafting never retrieves RFP source passages.
         """
         if k <= 0:
             return []
@@ -232,7 +242,11 @@ class PostgreSQLVectorStore(VectorStore):
                 )
                 .join(Document, DocumentChunk.document_id == Document.id)
                 .where(Document.workspace_id == self._workspace_id)
-                .order_by(
+            )
+            if source_type is not None:
+                stmt = stmt.where(Document.source_type == source_type)
+            stmt = (
+                stmt.order_by(
                     DocumentChunk.embedding.cosine_distance(query_embedding)
                 )
                 .limit(k)
@@ -431,10 +445,13 @@ class PostgreSQLVectorStore(VectorStore):
         _run_async(self.async_add(records))
 
     def search(
-        self, query_embedding: List[float], k: int = 5
+        self, query_embedding: List[float], k: int = 5,
+        source_type: Optional[str] = None,
     ) -> List[SearchResult]:
         """Search for the top-k most similar records (sync fallback)."""
-        return _run_async(self.async_search(query_embedding, k))
+        return _run_async(
+            self.async_search(query_embedding, k, source_type=source_type)
+        )
 
     def delete_by_metadata(self, metadata_filter: dict[str, Any]) -> int:
         """Delete records matching a metadata filter (sync fallback)."""

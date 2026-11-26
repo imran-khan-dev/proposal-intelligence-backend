@@ -115,6 +115,7 @@ async def _add_doc(store, doc_id: str, text: str, ws_uuid: uuid.UUID):
                     "character_end": len(text),
                     "source_filename": f"{doc_id}.txt",
                     "workspace_id": ws_str,
+                    "source_type": "company_knowledge",
                 },
             )
         ]

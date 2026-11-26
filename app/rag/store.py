@@ -57,13 +57,18 @@ class VectorStore(ABC):
 
     @abstractmethod
     def search(
-        self, query_embedding: List[float], k: int = 5
+        self, query_embedding: List[float], k: int = 5,
+        source_type: Optional[str] = None,
     ) -> List[SearchResult]:
         """Search for the top-k most similar records.
 
         Args:
             query_embedding: The query vector to search for.
             k: Number of top results to return (default: 5).
+            source_type: Optional document category filter. When set, only
+                records whose metadata ``source_type`` matches are returned.
+                The filter is applied before the top-k cut so a strong match
+                of another category cannot crowd out matching records.
 
         Returns:
             List of SearchResult objects sorted by similarity (highest first).
@@ -76,13 +81,16 @@ class VectorStore(ABC):
 
     @abstractmethod
     async def async_search(
-        self, query_embedding: List[float], k: int = 5
+        self, query_embedding: List[float], k: int = 5,
+        source_type: Optional[str] = None,
     ) -> List[SearchResult]:
         """Asynchronously search for the top-k most similar records.
 
         Args:
             query_embedding: The query vector to search for.
             k: Number of top results to return (default: 5).
+            source_type: Optional document category filter (see
+                :meth:`search`).
 
         Returns:
             List of SearchResult objects sorted by similarity (highest first).
@@ -255,12 +263,23 @@ class InMemoryVectorStore(VectorStore):
         self._records.extend(records)
 
     def search(
-        self, query_embedding: List[float], k: int = 5
+        self, query_embedding: List[float], k: int = 5,
+        source_type: Optional[str] = None,
     ) -> List[SearchResult]:
         if k <= 0:
             return []
 
-        if not self._records:
+        # Apply the source-type filter before the top-k cut so a strong match
+        # of another category cannot crowd out matching records.
+        if source_type is None:
+            records = self._records
+        else:
+            records = [
+                r for r in self._records
+                if r.metadata.get("source_type") == source_type
+            ]
+
+        if not records:
             return []
 
         if self._dimension is None:
@@ -276,7 +295,7 @@ class InMemoryVectorStore(VectorStore):
 
         # Convert to numpy arrays
         query_vec = np.array(query_embedding, dtype=np.float32)
-        record_vecs = np.array([r.embedding for r in self._records], dtype=np.float32)
+        record_vecs = np.array([r.embedding for r in records], dtype=np.float32)
 
         # Cosine similarity: (A · B) / (||A|| ||B||)
         query_norm = np.linalg.norm(query_vec)
@@ -290,7 +309,7 @@ class InMemoryVectorStore(VectorStore):
             return []
 
         # Compute similarities for valid records
-        similarities = np.full(len(self._records), -1.0, dtype=np.float32)  # -1 for invalid
+        similarities = np.full(len(records), -1.0, dtype=np.float32)  # -1 for invalid
         dot_products = np.dot(record_vecs[valid_norms], query_vec)
         similarities[valid_norms] = dot_products / (
             record_norms[valid_norms] * query_norm
@@ -309,7 +328,7 @@ class InMemoryVectorStore(VectorStore):
         results = []
         for idx in top_indices:
             results.append(
-                SearchResult(record=self._records[idx], score=float(similarities[idx]))
+                SearchResult(record=records[idx], score=float(similarities[idx]))
             )
 
         return results
@@ -389,10 +408,11 @@ class InMemoryVectorStore(VectorStore):
         self.add(records)
 
     async def async_search(
-        self, query_embedding: List[float], k: int = 5
+        self, query_embedding: List[float], k: int = 5,
+        source_type: Optional[str] = None,
     ) -> List[SearchResult]:
         """Async wrapper for search (sync implementation)."""
-        return self.search(query_embedding, k)
+        return self.search(query_embedding, k, source_type=source_type)
 
     async def async_delete_by_metadata(self, metadata_filter: dict[str, Any]) -> int:
         """Async wrapper for delete_by_metadata (sync implementation)."""
@@ -593,12 +613,23 @@ class PersistentVectorStore(VectorStore):
             raise
 
     def search(
-        self, query_embedding: List[float], k: int = 5
+        self, query_embedding: List[float], k: int = 5,
+        source_type: Optional[str] = None,
     ) -> List[SearchResult]:
         if k <= 0:
             return []
 
-        if not self._records:
+        # Apply the source-type filter before the top-k cut so a strong match
+        # of another category cannot crowd out matching records.
+        if source_type is None:
+            records = self._records
+        else:
+            records = [
+                r for r in self._records
+                if r.metadata.get("source_type") == source_type
+            ]
+
+        if not records:
             return []
 
         if self._dimension is None:
@@ -614,7 +645,7 @@ class PersistentVectorStore(VectorStore):
 
         # Convert to numpy arrays
         query_vec = np.array(query_embedding, dtype=np.float32)
-        record_vecs = np.array([r.embedding for r in self._records], dtype=np.float32)
+        record_vecs = np.array([r.embedding for r in records], dtype=np.float32)
 
         # Cosine similarity: (A · B) / (||A|| ||B||)
         query_norm = np.linalg.norm(query_vec)
@@ -628,7 +659,7 @@ class PersistentVectorStore(VectorStore):
             return []
 
         # Compute similarities for valid records
-        similarities = np.full(len(self._records), -1.0, dtype=np.float32)  # -1 for invalid
+        similarities = np.full(len(records), -1.0, dtype=np.float32)  # -1 for invalid
         dot_products = np.dot(record_vecs[valid_norms], query_vec)
         similarities[valid_norms] = dot_products / (
             record_norms[valid_norms] * query_norm
@@ -647,7 +678,7 @@ class PersistentVectorStore(VectorStore):
         results = []
         for idx in top_indices:
             results.append(
-                SearchResult(record=self._records[idx], score=float(similarities[idx]))
+                SearchResult(record=records[idx], score=float(similarities[idx]))
             )
 
         return results
@@ -750,10 +781,11 @@ class PersistentVectorStore(VectorStore):
         self.add(records)
 
     async def async_search(
-        self, query_embedding: List[float], k: int = 5
+        self, query_embedding: List[float], k: int = 5,
+        source_type: Optional[str] = None,
     ) -> List[SearchResult]:
         """Async wrapper for search (sync implementation)."""
-        return self.search(query_embedding, k)
+        return self.search(query_embedding, k, source_type=source_type)
 
     async def async_delete_by_metadata(self, metadata_filter: dict[str, Any]) -> int:
         """Async wrapper for delete_by_metadata (sync implementation)."""

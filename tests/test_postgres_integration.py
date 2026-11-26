@@ -232,3 +232,72 @@ class TestPostgresReIngestion:
 
         chunks = await store.async_get_document_chunks("doc-a")
         assert [c["text"] for c in chunks] == ["second version", "more"]
+
+
+def _make_typed_records(doc_id, workspace_id, source_type, text):
+    """Build a single-chunk record carrying an explicit ``source_type``."""
+    return [
+        VectorRecord(
+            id=f"{doc_id}_chunk_0",
+            text=text,
+            embedding=[0.1] * 384,
+            metadata={
+                "doc_id": doc_id,
+                "chunk_index": 0,
+                "page_number": 1,
+                "character_start": 0,
+                "character_end": len(text),
+                "source_filename": f"{doc_id}.txt",
+                "workspace_id": str(workspace_id),
+                "source_type": source_type,
+            },
+        )
+    ]
+
+
+class TestPostgresSourceTypeFilter:
+    """The source-type filter must not weaken workspace isolation."""
+
+    async def test_company_only_search_is_workspace_scoped(
+        self, db_engine, clean_tables
+    ):
+        store_a = PostgreSQLVectorStore(workspace_id=WS_A)
+        store_b = PostgreSQLVectorStore(workspace_id=WS_B)
+
+        # Workspace A: one RFP doc and one company-knowledge doc.
+        await store_a.async_add(
+            _make_typed_records("a-rfp", WS_A, "rfp", "rfp requirement text")
+        )
+        await store_a.async_add(
+            _make_typed_records(
+                "a-comp", WS_A, "company_knowledge", "company capability text"
+            )
+        )
+        # Workspace B: one company-knowledge doc.
+        await store_b.async_add(
+            _make_typed_records(
+                "b-comp", WS_B, "company_knowledge", "other workspace capability"
+            )
+        )
+
+        query = [0.1] * 384
+
+        # With the company-knowledge filter, only A's company doc is returned.
+        company = await store_a.async_search(
+            query, k=5, source_type="company_knowledge"
+        )
+        assert [r.record.metadata["doc_id"] for r in company] == ["a-comp"]
+
+        # Without the filter, A's RFP doc is also present (proves the filter is
+        # what excludes it, not workspace scoping alone).
+        all_a = await store_a.async_search(query, k=5)
+        assert {r.record.metadata["doc_id"] for r in all_a} == {"a-rfp", "a-comp"}
+
+        # Workspace B's company doc never leaks into A, even with the filter.
+        company_b = await store_b.async_search(
+            query, k=5, source_type="company_knowledge"
+        )
+        assert [r.record.metadata["doc_id"] for r in company_b] == ["b-comp"]
+        assert all(
+            r.record.metadata["workspace_id"] == str(WS_B) for r in company_b
+        )
