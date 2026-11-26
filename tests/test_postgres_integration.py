@@ -28,6 +28,23 @@ from app.core.database import (
 )
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
+from app.models.extraction_run import ExtractionRun
+from app.models.requirement import Requirement
+from app.modules.drafting.assessment import ComplianceStatus
+from app.modules.drafting.generation import (
+    EvidenceCitation,
+    RequirementDraft,
+    UncertaintyLevel,
+)
+from app.modules.drafting.repository import PostgresDraftingRepository
+from app.modules.drafting.retrieval import _search_result_to_passage
+from app.modules.drafting.verification import (
+    REASON_EVIDENCE_ID_NOT_FOUND,
+    REASON_VERIFIED,
+    REASON_WRONG_WORKSPACE,
+    CitationVerificationResult,
+    verify_citations,
+)
 from app.rag.store import VectorRecord
 from app.rag.stores.postgres_vector_store import PostgreSQLVectorStore
 
@@ -232,3 +249,239 @@ class TestPostgresReIngestion:
 
         chunks = await store.async_get_document_chunks("doc-a")
         assert [c["text"] for c in chunks] == ["second version", "more"]
+
+
+def _make_typed_records(doc_id, workspace_id, source_type, text):
+    """Build a single-chunk record carrying an explicit ``source_type``."""
+    return [
+        VectorRecord(
+            id=f"{doc_id}_chunk_0",
+            text=text,
+            embedding=[0.1] * 384,
+            metadata={
+                "doc_id": doc_id,
+                "chunk_index": 0,
+                "page_number": 1,
+                "character_start": 0,
+                "character_end": len(text),
+                "source_filename": f"{doc_id}.txt",
+                "workspace_id": str(workspace_id),
+                "source_type": source_type,
+            },
+        )
+    ]
+
+
+class TestPostgresSourceTypeFilter:
+    """The source-type filter must not weaken workspace isolation."""
+
+    async def test_company_only_search_is_workspace_scoped(
+        self, db_engine, clean_tables
+    ):
+        store_a = PostgreSQLVectorStore(workspace_id=WS_A)
+        store_b = PostgreSQLVectorStore(workspace_id=WS_B)
+
+        # Workspace A: one RFP doc and one company-knowledge doc.
+        await store_a.async_add(
+            _make_typed_records("a-rfp", WS_A, "rfp", "rfp requirement text")
+        )
+        await store_a.async_add(
+            _make_typed_records(
+                "a-comp", WS_A, "company_knowledge", "company capability text"
+            )
+        )
+        # Workspace B: one company-knowledge doc.
+        await store_b.async_add(
+            _make_typed_records(
+                "b-comp", WS_B, "company_knowledge", "other workspace capability"
+            )
+        )
+
+        query = [0.1] * 384
+
+        # With the company-knowledge filter, only A's company doc is returned.
+        company = await store_a.async_search(
+            query, k=5, source_type="company_knowledge"
+        )
+        assert [r.record.metadata["doc_id"] for r in company] == ["a-comp"]
+
+        # Without the filter, A's RFP doc is also present (proves the filter is
+        # what excludes it, not workspace scoping alone).
+        all_a = await store_a.async_search(query, k=5)
+        assert {r.record.metadata["doc_id"] for r in all_a} == {"a-rfp", "a-comp"}
+
+        # Workspace B's company doc never leaks into A, even with the filter.
+        company_b = await store_b.async_search(
+            query, k=5, source_type="company_knowledge"
+        )
+        assert [r.record.metadata["doc_id"] for r in company_b] == ["b-comp"]
+        assert all(
+            r.record.metadata["workspace_id"] == str(WS_B) for r in company_b
+        )
+
+
+class _FixedEmbedder:
+    """Embedder returning a constant vector (dimension 384)."""
+
+    dimension = 384
+
+    def embed(self, texts):
+        return [[0.1] * 384 for _ in texts]
+
+
+class TestCitationVerificationIntegration:
+    """End-to-end citation verification against real PostgreSQL evidence."""
+
+    async def test_company_citation_verified_rfp_and_cross_ws_fail(
+        self, db_engine, clean_tables
+    ):
+        store_a = PostgreSQLVectorStore(workspace_id=WS_A)
+        store_b = PostgreSQLVectorStore(workspace_id=WS_B)
+
+        await store_a.async_add(
+            _make_typed_records(
+                "a-comp", WS_A, "company_knowledge",
+                "company capability text about SAML single sign-on",
+            )
+        )
+        await store_a.async_add(
+            _make_typed_records(
+                "a-rfp", WS_A, "rfp", "rfp requirement text about SAML"
+            )
+        )
+        await store_b.async_add(
+            _make_typed_records(
+                "b-comp", WS_B, "company_knowledge",
+                "workspace B company capability text",
+            )
+        )
+
+        embedder = _FixedEmbedder()
+
+        async def _company_passages(store):
+            q = embedder.embed(["company capability SAML single sign-on"])[0]
+            results = await store.async_search(
+                q, k=5, source_type="company_knowledge"
+            )
+            return [
+                _search_result_to_passage(r, i + 1) for i, r in enumerate(results)
+            ]
+
+        # Retrieval is company-knowledge only, scoped to workspace A.
+        passages_a = await _company_passages(store_a)
+        assert [p.source_doc_id for p in passages_a] == ["a-comp"]
+        company_chunk_id = passages_a[0].chunk_id
+        assert passages_a[0].metadata.get("workspace_id") == str(WS_A)
+
+        # A valid company-knowledge citation verifies.
+        ok = verify_citations(
+            [EvidenceCitation(company_chunk_id, "SAML single sign-on", 0.1)],
+            passages_a,
+            WS_A,
+        )
+        assert len(ok) == 1 and ok[0].verified is True
+        assert ok[0].reason == REASON_VERIFIED
+
+        # A citation to the RFP chunk is not among retrieved evidence -> fails.
+        rfp = verify_citations(
+            [EvidenceCitation("a-rfp_chunk_0", "rfp requirement text", 0.1)],
+            passages_a,
+            WS_A,
+        )
+        assert rfp[0].verified is False
+        assert rfp[0].reason == REASON_EVIDENCE_ID_NOT_FOUND
+
+        # Cross-workspace: a WS_B passage verified against WS_A fails.
+        passages_b = await _company_passages(store_b)
+        assert [p.source_doc_id for p in passages_b] == ["b-comp"]
+        cross = verify_citations(
+            [EvidenceCitation(passages_b[0].chunk_id, "company capability", 0.1)],
+            passages_b,
+            WS_A,
+        )
+        assert cross[0].verified is False
+        assert cross[0].reason == REASON_WRONG_WORKSPACE
+
+
+class TestCompliancePersistenceIntegration:
+    """Compliance assessment persists via the existing repository pattern."""
+
+    async def _make_requirement(self) -> uuid.UUID:
+        factory = get_async_session_factory()
+        async with factory() as session:
+            run = ExtractionRun(
+                workspace_id=WS_A,
+                doc_id="doc1",
+                status="completed",
+                requirement_count=1,
+                errors=[],
+            )
+            session.add(run)
+            await session.flush()
+            req = Requirement(
+                workspace_id=WS_A,
+                run_id=run.id,
+                requirement_key="doc1:p1:1-10",
+                doc_id="doc1",
+                text="The system must support SAML 2.0 single sign-on.",
+                page_number=1,
+                character_start=1,
+                character_end=10,
+                modality="mandatory",
+                category="security",
+                confidence=0.9,
+                extraction_method="rule",
+            )
+            session.add(req)
+            await session.commit()
+            return req.id
+
+    async def test_compliance_persisted_and_older_records_readable(
+        self, db_engine, clean_tables
+    ):
+        requirement_id = await self._make_requirement()
+        repo = PostgresDraftingRepository()
+
+        # Unassessed record remains readable (NULL compliance).
+        run = await repo.create_draft_run(WS_A, requirement_id, None)
+        fetched = await repo.get_draft_run(run.run_id)
+        assert fetched is not None
+        assert fetched.compliance_status is None
+
+        # Complete with an assessment.
+        draft = RequirementDraft(
+            requirement_id=requirement_id,
+            requirement_key="doc1:p1:1-10",
+            requirement_text="The system must support SAML 2.0 single sign-on.",
+            draft_answer="We support SAML 2.0 single sign-on.",
+            citations=[EvidenceCitation("chunk_1", "SAML 2.0 single sign-on", 0.9)],
+            evidence_found=True,
+            uncertainty=UncertaintyLevel.SUPPORTED,
+            uncertainty_notes=[],
+            evidence_passages=[],
+            citation_verifications=[
+                CitationVerificationResult(
+                    evidence_id="chunk_1",
+                    excerpt="SAML 2.0 single sign-on",
+                    verified=True,
+                    reason=REASON_VERIFIED,
+                    source_doc_id="comp_doc",
+                    workspace_id=str(WS_A),
+                )
+            ],
+            compliance_status=ComplianceStatus.COMPLIANT,
+            compliance_rationale="Verified evidence meets the requirement.",
+        )
+        await repo.complete_draft_run(run.run_id, draft)
+
+        stored = await repo.get_draft_run(run.run_id)
+        assert stored is not None
+        assert stored.compliance_status == "compliant"
+        assert stored.compliance_rationale == "Verified evidence meets the requirement."
+        # Citations (with verification) and answer preserved.
+        assert stored.draft_answer == "We support SAML 2.0 single sign-on."
+        assert stored.citations[0]["verified"] is True
+
+        # Workspace isolation: another workspace cannot read this run.
+        other = await repo.get_latest_draft_run(WS_B, requirement_id)
+        assert other is None

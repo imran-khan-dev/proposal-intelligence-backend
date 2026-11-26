@@ -1,6 +1,6 @@
 """RAG retrieval pipeline."""
 
-from typing import List
+from typing import List, Optional
 
 from app.ai.embeddings import EmbeddingProvider
 from app.rag.store import SearchResult, VectorStore
@@ -11,6 +11,7 @@ def retrieve(
     embedder: EmbeddingProvider,
     store: VectorStore,
     top_k: int = 5,
+    source_type: Optional[str] = None,
 ) -> List[SearchResult]:
     """Retrieve relevant chunks for a query.
 
@@ -19,6 +20,9 @@ def retrieve(
         embedder: Embedding provider to generate query vector.
         store: Vector store to search.
         top_k: Maximum number of results to return (default: 5).
+        source_type: Optional document category filter. When set, only chunks
+            whose metadata ``source_type`` matches are searched (e.g.
+            ``"company_knowledge"`` to exclude RFP source passages).
 
     Returns:
         List of SearchResult objects sorted by similarity (highest first).
@@ -46,4 +50,4 @@ def retrieve(
     query_embedding = query_embeddings[0]
 
     # Search the store
-    return store.search(query_embedding, k=top_k)
+    return store.search(query_embedding, k=top_k, source_type=source_type)

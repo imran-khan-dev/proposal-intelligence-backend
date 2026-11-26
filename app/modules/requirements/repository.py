@@ -83,6 +83,13 @@ class RequirementRepository(ABC):
         """Return a single requirement by key within a workspace."""
         ...
 
+    @abstractmethod
+    async def get_requirement_id(
+        self, workspace_id: uuid.UUID, doc_id: str, requirement_key: str
+    ) -> Optional[uuid.UUID]:
+        """Return the primary key UUID of a requirement by key."""
+        ...
+
 
 def _run_to_record(run: ExtractionRun) -> ExtractionRunRecord:
     return ExtractionRunRecord(
@@ -279,6 +286,25 @@ class PostgresRequirementRepository(RequirementRepository):
             req = result.scalar_one_or_none()
             return _req_to_record(req) if req is not None else None
 
+    async def get_requirement_id(
+        self, workspace_id: uuid.UUID, doc_id: str, requirement_key: str
+    ) -> Optional[uuid.UUID]:
+        """Return the primary key UUID of a requirement by key."""
+        async with self._session_factory() as session:
+            stmt = (
+                select(Requirement.id)
+                .join(ExtractionRun, Requirement.run_id == ExtractionRun.id)
+                .where(
+                    Requirement.workspace_id == workspace_id,
+                    Requirement.doc_id == doc_id,
+                    Requirement.requirement_key == requirement_key,
+                )
+                .order_by(ExtractionRun.created_at.desc())
+                .limit(1)
+            )
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
 
 class InMemoryRequirementRepository(RequirementRepository):
     """Deterministic in-memory repository for tests."""
@@ -375,4 +401,15 @@ class InMemoryRequirementRepository(RequirementRepository):
         for req in await self.list_requirements(workspace_id, doc_id):
             if req.requirement_key == requirement_key:
                 return req
+        return None
+
+    async def get_requirement_id(
+        self, workspace_id: uuid.UUID, doc_id: str, requirement_key: str
+    ) -> Optional[uuid.UUID]:
+        # In-memory doesn't have persistent UUIDs; generate deterministic one
+        # based on the requirement key for consistency within a test run
+        for req in await self.list_requirements(workspace_id, doc_id):
+            if req.requirement_key == requirement_key:
+                # Generate a deterministic UUID from the requirement key
+                return uuid.uuid5(uuid.NAMESPACE_DNS, requirement_key)
         return None

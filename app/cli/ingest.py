@@ -140,6 +140,7 @@ def main(argv: list[str] = None) -> int:
             embedder=embedder,
             chunk_size=args.chunk_size,
             overlap=args.overlap,
+            source_type="company_knowledge",
         )
 
         if args.verbose:

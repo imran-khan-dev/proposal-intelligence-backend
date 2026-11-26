@@ -5,6 +5,7 @@ from app.modules.agent.route import router as AgentRoutes
 from app.modules.documents.route import router as DocumentsRoutes
 from app.modules.requirements.route import router as RequirementsRoutes
 from app.modules.rfp_analyze.route import router as RfpAnalyzeRoutes
+from app.modules.drafting.route import router as DraftingRoutes
 
 
 router = APIRouter()
@@ -25,6 +26,10 @@ module_routes = [
     {
         "path": "/requirements",
         "route": RequirementsRoutes,
+    },
+    {
+        "path": "/drafting",
+        "route": DraftingRoutes,
     },
 ]
 

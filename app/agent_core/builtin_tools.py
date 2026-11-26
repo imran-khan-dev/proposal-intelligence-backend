@@ -119,10 +119,17 @@ def create_search_company_knowledge_tool(
 
         # Use async search if available (for PostgreSQLVectorStore)
         if hasattr(store, 'async_search'):
-            results = await store.async_search(query_embedding=query_embedding, k=top_k)
+            results = await store.async_search(
+                query_embedding=query_embedding,
+                k=top_k,
+                source_type="company_knowledge",
+            )
         else:
             # Fallback to sync search for InMemoryVectorStore, PersistentVectorStore
-            results = await asyncio.to_thread(store.search, query_embedding, top_k)
+            results = await asyncio.to_thread(
+                store.search, query_embedding, top_k,
+                source_type="company_knowledge",
+            )
 
         # Convert SearchResult objects to JSON-serializable dicts
         return [

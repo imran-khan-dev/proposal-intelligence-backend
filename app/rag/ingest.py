@@ -325,6 +325,7 @@ def _build_record_metadata(
     source_filename: Optional[str],
     section_path: Optional[str],
     workspace_id: Optional[str],
+    source_type: str = "rfp",
     extra: Optional[dict] = None,
 ) -> dict:
     metadata: dict = {
@@ -333,6 +334,7 @@ def _build_record_metadata(
         "page_number": page_number,
         "character_start": character_start,
         "character_end": character_end,
+        "source_type": source_type,
     }
     if source_filename is not None:
         metadata["source_filename"] = source_filename
@@ -356,6 +358,7 @@ def ingest_document(
     pages: Optional[List[dict]] = None,
     source_filename: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    source_type: str = "rfp",
 ) -> int:
     """Ingest a document into the vector store (synchronous version).
 
@@ -377,6 +380,10 @@ def ingest_document(
         source_filename: Original filename of the source document.
         workspace_id: Workspace identifier for isolation, stored in chunk
             metadata.
+        source_type: Document category stored in chunk metadata and used to
+            scope retrieval (e.g. ``"rfp"`` or ``"company_knowledge"``).
+            Defaults to ``"rfp"`` so RFP ingestion is never accidentally
+            classified as company knowledge.
 
     Returns:
         Number of chunks ingested (0 if text is empty/whitespace).
@@ -465,6 +472,7 @@ def ingest_document(
             source_filename=source_filename,
             section_path=chunk.section_path,
             workspace_id=workspace_id,
+            source_type=source_type,
             extra=chunk.metadata,
         )
         records.append(
@@ -501,6 +509,7 @@ async def async_ingest_document(
     pages: Optional[List[dict]] = None,
     source_filename: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    source_type: str = "rfp",
 ) -> int:
     """Ingest a document into the vector store (async version for FastAPI).
 
@@ -585,6 +594,7 @@ async def async_ingest_document(
             source_filename=source_filename,
             section_path=chunk.section_path,
             workspace_id=workspace_id,
+            source_type=source_type,
             extra=chunk.metadata,
         )
         records.append(
