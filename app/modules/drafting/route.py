@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from app.modules.drafting.controller import (
+    edit_answer_controller,
     get_draft_controller,
     get_drafting_status_controller,
     get_review_history_controller,
@@ -13,6 +14,8 @@ from app.modules.drafting.controller import (
 from app.modules.drafting.schema import (
     DraftListResponse,
     DraftingStatusResponse,
+    EditAnswerRequest,
+    EditAnswerResponse,
     ReviewDraftRequest,
     ReviewDraftResponse,
     ReviewHistoryResponse,
@@ -73,7 +76,12 @@ async def review_draft_route(
     return await review_draft_controller(doc_id, requirement_key, request)
 
 
-@router.get("/{doc_id}/requirements/{requirement_key}/history", response_model=ReviewHistoryResponse)
+@router.put("/{doc_id}/requirements/{requirement_key}/answer", response_model=EditAnswerResponse)
+async def edit_answer_route(
+    doc_id: str, requirement_key: str, request: EditAnswerRequest
+) -> EditAnswerResponse:
+    """Manually edit and persist an AI-generated answer."""
+    return await edit_answer_controller(doc_id, requirement_key, request)
 async def get_review_history_route(
     doc_id: str, requirement_key: str
 ) -> ReviewHistoryResponse:
