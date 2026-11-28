@@ -8,30 +8,9 @@ when available, with fallback to the original vector-only search.
 from typing import List, Optional
 
 from app.ai.embeddings import EmbeddingProvider
-from app.rag.hybrid_retrieval import HybridRetrievalService, create_hybrid_retrieval_service
+from app.rag.hybrid_retrieval import HybridRetrievalService, get_or_create_hybrid_service
 from app.rag.store import SearchResult, VectorStore
 from app.rag.stores.postgres_vector_store import PostgreSQLVectorStore
-
-
-def _create_hybrid_service(
-    embedder: EmbeddingProvider,
-    store: VectorStore,
-    enable_reranking: bool = False,
-) -> Optional[HybridRetrievalService]:
-    """Create a hybrid retrieval service for the given store.
-
-    Returns None if the store is not a PostgreSQLVectorStore (hybrid search
-    requires PostgreSQL for BM25 index building).
-    """
-    if not isinstance(store, PostgreSQLVectorStore):
-        return None
-
-    return create_hybrid_retrieval_service(
-        store=store,
-        embedder=embedder,
-        enable_reranking=enable_reranking,
-        cache_bm25_index=True,
-    )
 
 
 def retrieve(
@@ -79,16 +58,22 @@ def retrieve(
 
     # Try hybrid search if requested and available
     if use_hybrid:
-        hybrid_service = _create_hybrid_service(embedder, store, enable_reranking)
+        # Extract workspace_id from PostgreSQLVectorStore if available
+        workspace_id = None
+        if hasattr(store, '_workspace_id_str'):
+            workspace_id = store._workspace_id_str
+        elif hasattr(store, '_workspace_id'):
+            workspace_id = str(store._workspace_id)
+
+        hybrid_service = get_or_create_hybrid_service(
+            embedder=embedder,
+            store=store,
+            workspace_id=workspace_id,
+            source_type=source_type,
+            enable_reranking=enable_reranking,
+        )
         if hybrid_service is not None:
             try:
-                # Extract workspace_id from PostgreSQLVectorStore if available
-                workspace_id = None
-                if hasattr(store, '_workspace_id_str'):
-                    workspace_id = store._workspace_id_str
-                elif hasattr(store, '_workspace_id'):
-                    workspace_id = str(store._workspace_id)
-                
                 return hybrid_service.search_hybrid(
                     query=query,
                     k=top_k,
@@ -154,16 +139,22 @@ async def async_retrieve(
 
     # Try hybrid search if requested and available
     if use_hybrid:
-        hybrid_service = _create_hybrid_service(embedder, store, enable_reranking)
+        # Extract workspace_id from PostgreSQLVectorStore if available
+        workspace_id = None
+        if hasattr(store, '_workspace_id_str'):
+            workspace_id = store._workspace_id_str
+        elif hasattr(store, '_workspace_id'):
+            workspace_id = str(store._workspace_id)
+
+        hybrid_service = get_or_create_hybrid_service(
+            embedder=embedder,
+            store=store,
+            workspace_id=workspace_id,
+            source_type=source_type,
+            enable_reranking=enable_reranking,
+        )
         if hybrid_service is not None:
             try:
-                # Extract workspace_id from PostgreSQLVectorStore if available
-                workspace_id = None
-                if hasattr(store, '_workspace_id_str'):
-                    workspace_id = store._workspace_id_str
-                elif hasattr(store, '_workspace_id'):
-                    workspace_id = str(store._workspace_id)
-                
                 return await hybrid_service.async_search_hybrid(
                     query=query,
                     k=top_k,

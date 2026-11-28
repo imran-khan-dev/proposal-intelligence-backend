@@ -8,6 +8,7 @@ and source-type filtering at the database level.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, List, Optional, Sequence
 
 from retrieval_stack.bm25 import BM25Searcher, InvertedIndex, Tokenizer as BM25Tokenizer
@@ -287,6 +288,8 @@ class HybridRetrievalService:
         # Convert BM25 results
         bm25_search_results = []
         for rank, result in enumerate(bm25_results, 1):
+            bm25_metadata = dict(result.metadata)
+            bm25_metadata["doc_id"] = result.chunk.document_id
             bm25_search_results.append(
                 HybridSearchResult(
                     chunk_id=result.chunk_id,
@@ -294,7 +297,7 @@ class HybridRetrievalService:
                     rrf_score=0.0,
                     sources=["bm25"],
                     bm25_rank=rank,
-                    metadata=dict(result.metadata),
+                    metadata=bm25_metadata,
                 )
             )
 
@@ -317,15 +320,14 @@ class HybridRetrievalService:
         # Convert back to SearchResult
         search_results = []
         for item in reranked:
-            # Find the original record metadata
-            chunk_id = item.chunk_id
-            # We need to reconstruct the VectorRecord
-            # For simplicity, create from the chunk
+            # Preserve metadata and add doc_id from chunk.document_id
+            metadata = dict(item.metadata)
+            metadata["doc_id"] = item.chunk.document_id
             record = VectorRecord(
                 id=item.chunk_id,
                 text=item.chunk.content,
                 embedding=[],  # Not needed for results
-                metadata=item.metadata,
+                metadata=metadata,
             )
             # Score: use relevance_score if reranked, else rrf_score
             score = getattr(item, "relevance_score", item.rrf_score)
@@ -409,6 +411,8 @@ class HybridRetrievalService:
 
         bm25_search_results = []
         for rank, result in enumerate(bm25_results, 1):
+            bm25_metadata = dict(result.metadata)
+            bm25_metadata["doc_id"] = result.chunk.document_id
             bm25_search_results.append(
                 HybridSearchResult(
                     chunk_id=result.chunk_id,
@@ -416,7 +420,7 @@ class HybridRetrievalService:
                     rrf_score=0.0,
                     sources=["bm25"],
                     bm25_rank=rank,
-                    metadata=dict(result.metadata),
+                    metadata=bm25_metadata,
                 )
             )
 
@@ -438,11 +442,14 @@ class HybridRetrievalService:
         # Convert to SearchResult
         search_results = []
         for item in reranked:
+            # Preserve metadata and add doc_id from chunk.document_id
+            metadata = dict(item.metadata)
+            metadata["doc_id"] = item.chunk.document_id
             record = VectorRecord(
                 id=item.chunk_id,
                 text=item.chunk.content,
                 embedding=[],
-                metadata=item.metadata,
+                metadata=metadata,
             )
             score = getattr(item, "relevance_score", item.rrf_score)
             search_results.append(SearchResult(record=record, score=float(score)))
@@ -547,6 +554,82 @@ class HybridRetrievalService:
         self._hybrid_searcher = None
         self._indexed_workspace_id = None
         self._indexed_source_type = None
+
+
+# Module-level cache of HybridRetrievalService instances
+# Key: (store_id, workspace_id, source_type, enable_reranking)
+_service_cache: dict[tuple, HybridRetrievalService] = {}
+_cache_lock = threading.Lock()
+
+
+def _get_cache_key(
+    store: VectorStore,
+    workspace_id: Optional[str],
+    source_type: Optional[str],
+    enable_reranking: bool,
+) -> tuple:
+    """Generate a cache key for the service."""
+    store_id = id(store)
+    return (store_id, workspace_id, source_type, enable_reranking)
+
+
+def get_or_create_hybrid_service(
+    embedder: EmbeddingProvider,
+    store: VectorStore,
+    workspace_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    enable_reranking: bool = False,
+) -> Optional[HybridRetrievalService]:
+    """Get or create a cached hybrid retrieval service.
+
+    Returns None if the store is not a PostgreSQLVectorStore (hybrid search
+    requires PostgreSQL for BM25 index building).
+    """
+    if not isinstance(store, PostgreSQLVectorStore):
+        return None
+
+    key = _get_cache_key(store, workspace_id, source_type, enable_reranking)
+
+    with _cache_lock:
+        if key in _service_cache:
+            return _service_cache[key]
+
+        service = create_hybrid_retrieval_service(
+            store=store,
+            embedder=embedder,
+            enable_reranking=enable_reranking,
+            cache_bm25_index=True,
+        )
+        _service_cache[key] = service
+        return service
+
+
+def invalidate_hybrid_cache(
+    workspace_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+) -> None:
+    """Invalidate cached BM25 indexes for the given workspace/source_type.
+
+    This should be called after document ingestion, deletion, or update
+    to ensure the next search rebuilds the index with the latest data.
+
+    Args:
+        workspace_id: Workspace to invalidate. If None, invalidates all workspaces.
+        source_type: Source type to invalidate. If None, invalidates all source types.
+    """
+    with _cache_lock:
+        keys_to_remove = []
+        for key, service in _service_cache.items():
+            cached_workspace_id = key[1]
+            cached_source_type = key[2]
+            if (workspace_id is None or cached_workspace_id == workspace_id) and \
+               (source_type is None or cached_source_type == source_type):
+                service.invalidate_index()
+                keys_to_remove.append(key)
+        for key in keys_to_remove:
+            del _service_cache[key]
+        if keys_to_remove:
+            logger.info("Invalidated hybrid retrieval cache for workspace=%s, source_type=%s", workspace_id, source_type)
 
 
 def create_hybrid_retrieval_service(

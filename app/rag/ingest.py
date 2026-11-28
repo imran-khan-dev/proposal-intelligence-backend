@@ -23,6 +23,7 @@ from typing import List, Optional
 from pypdf import PdfReader
 
 from app.ai.embeddings import EmbeddingProvider
+from app.rag.hybrid_retrieval import invalidate_hybrid_cache
 from app.rag.store import VectorRecord, VectorStore
 
 
@@ -399,6 +400,8 @@ def ingest_document(
             delete_filter["workspace_id"] = workspace_id
         if store.count() > 0:
             store.delete_by_metadata(delete_filter)
+            # Invalidate hybrid retrieval cache for this workspace/source_type
+            invalidate_hybrid_cache(workspace_id=workspace_id, source_type=source_type)
         return 0
 
     # Build page-aware chunks with absolute offsets when pages are provided.
@@ -427,6 +430,8 @@ def ingest_document(
             delete_filter["workspace_id"] = workspace_id
         if store.count() > 0:
             store.delete_by_metadata(delete_filter)
+            # Invalidate hybrid retrieval cache for this workspace/source_type
+            invalidate_hybrid_cache(workspace_id=workspace_id, source_type=source_type)
         return 0
 
     chunk_texts = [chunk.text for chunk in text_chunks]
@@ -495,6 +500,10 @@ def ingest_document(
     # Step 6: Add new chunks
     store.add(records)
 
+    # Invalidate hybrid retrieval cache for this workspace/source_type
+    # so subsequent searches rebuild the BM25 index with fresh data.
+    invalidate_hybrid_cache(workspace_id=workspace_id, source_type=source_type)
+
     return len(records)
 
 
@@ -522,6 +531,8 @@ async def async_ingest_document(
             delete_filter["workspace_id"] = workspace_id
         if await store.async_count() > 0:
             await store.async_delete_by_metadata(delete_filter)
+            # Invalidate hybrid retrieval cache for this workspace/source_type
+            invalidate_hybrid_cache(workspace_id=workspace_id, source_type=source_type)
         return 0
 
     # Build page-aware chunks with absolute offsets when pages are provided.
@@ -549,6 +560,8 @@ async def async_ingest_document(
             delete_filter["workspace_id"] = workspace_id
         if await store.async_count() > 0:
             await store.async_delete_by_metadata(delete_filter)
+            # Invalidate hybrid retrieval cache for this workspace/source_type
+            invalidate_hybrid_cache(workspace_id=workspace_id, source_type=source_type)
         return 0
 
     chunk_texts = [chunk.text for chunk in text_chunks]
@@ -616,5 +629,9 @@ async def async_ingest_document(
 
     # Step 6: Add new chunks
     await store.async_add(records)
+
+    # Invalidate hybrid retrieval cache for this workspace/source_type
+    # so subsequent searches rebuild the BM25 index with fresh data.
+    invalidate_hybrid_cache(workspace_id=workspace_id, source_type=source_type)
 
     return len(records)
