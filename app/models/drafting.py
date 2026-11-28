@@ -266,6 +266,49 @@ class DraftGenerationRun(Base):
         Text,
         nullable=True,
     )
+    # Human review lifecycle (M4.1): pending_review | approved | changes_requested
+    review_status: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    # Human reviewer's edited answer (separate from AI-generated draft_answer)
+    reviewer_edited_answer: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    # Human reviewer's compliance status override (separate from AI assessment)
+    reviewer_compliance_status: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    # Human reviewer's compliance rationale
+    reviewer_compliance_rationale: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    # Reviewer comment/reason for the decision
+    reviewer_comment: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    # Per-citation review decisions (distinct from automated M3.3 verification).
+    # JSONB array of: {"evidence_id": str, "decision": "accept|reject|modify", "reviewer_excerpt": str, "reason": str}
+    citation_reviews: Mapped[list] = mapped_column(
+        "citation_reviews",
+        JSONB,
+        nullable=False,
+        default=list,
+    )
+    # Timestamp when review was completed
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # Identity/audit: server-resolved workspace of the reviewer (feasible with current architecture)
+    reviewer_workspace_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
     # pending | running | completed | failed
     status: Mapped[str] = mapped_column(
         String(32),
@@ -313,3 +356,98 @@ class DraftGenerationRun(Base):
 # Requirement.evidence_runs = relationship("EvidenceRetrievalRun", back_populates="requirement")
 # Requirement.draft_runs = relationship("DraftGenerationRun", back_populates="requirement")
 # EvidenceRetrievalRun.draft_runs = relationship("DraftGenerationRun", back_populates="retrieval_run")
+
+
+class ReviewAuditEvent(Base):
+    """Append-only audit event for human review actions (M4.2).
+
+    Each successful human review submission creates an immutable audit record
+    capturing the reviewer's decisions, comments, and timestamp. Records are
+    never modified or deleted — they form a complete chronological history
+    of all review actions for a requirement.
+    """
+
+    __tablename__ = "review_audit_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+        index=True,
+    )
+    requirement_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("requirements.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    draft_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("draft_generation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Previous review status before this event (None for first review)
+    previous_review_status: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    # Review decision: approved | changes_requested
+    review_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    # Explicit decision: approve | request_changes
+    decision: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    # Reviewer's edited answer (may be None if not changed)
+    reviewer_edited_answer: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    # Reviewer's compliance status override
+    reviewer_compliance_status: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    # Reviewer's compliance rationale
+    reviewer_compliance_rationale: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    # Reviewer's comment/reason for the decision
+    reviewer_comment: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    # Per-citation review decisions
+    citation_reviews: Mapped[list] = mapped_column(
+        "citation_reviews",
+        JSONB,
+        nullable=False,
+        default=list,
+    )
+    # Timestamp when review was completed
+    reviewed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    # Identity/audit: server-resolved workspace of the reviewer
+    reviewer_workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ReviewAuditEvent(id={self.id}, requirement_id={self.requirement_id}, "
+            f"previous_review_status={self.previous_review_status}, review_status={self.review_status}, "
+            f"decision={self.decision}, reviewed_at={self.reviewed_at})>"
+        )

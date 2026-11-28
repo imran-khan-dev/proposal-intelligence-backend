@@ -14,12 +14,17 @@ from app.ai.error_handling import handle_ai_exception
 from app.core.workspace import resolve_workspace_id, workspace_id_str
 from app.modules.drafting.repository import PostgresDraftingRepository
 from app.modules.drafting.schema import (
+    CitationReviewResponse,
     CitationVerificationResponse,
     DraftListResponse,
     DraftingStatusResponse,
     EvidenceCitationResponse,
     EvidencePassageResponse,
     RequirementDraftResponse,
+    ReviewAuditEventResponse,
+    ReviewDraftRequest,
+    ReviewDraftResponse,
+    ReviewHistoryResponse,
     SingleDraftResponse,
     StartDraftingRequest,
     StartDraftingResponse,
@@ -292,9 +297,19 @@ async def list_drafts_controller(
                         citation_verifications=_citation_verifications_from_stored(
                             draft_run.citations
                         ),
+                        citation_reviews=_citation_reviews_from_stored(
+                            draft_run.citation_reviews
+                        ),
                         compliance_status=draft_run.compliance_status or "needs_review",
                         compliance_rationale=draft_run.compliance_rationale
                         or "Assessment not available for this draft.",
+                        # Human review fields (M4.1)
+                        review_status=draft_run.review_status,
+                        reviewer_edited_answer=draft_run.reviewer_edited_answer,
+                        reviewer_compliance_status=draft_run.reviewer_compliance_status,
+                        reviewer_compliance_rationale=draft_run.reviewer_compliance_rationale,
+                        reviewer_comment=draft_run.reviewer_comment,
+                        reviewed_at=draft_run.reviewed_at,
                     )
                 )
         except Exception as exc:
@@ -393,9 +408,19 @@ async def get_draft_controller(
             citation_verifications=_citation_verifications_from_stored(
                 draft_run.citations
             ),
+            citation_reviews=_citation_reviews_from_stored(
+                draft_run.citation_reviews
+            ),
             compliance_status=draft_run.compliance_status or "needs_review",
             compliance_rationale=draft_run.compliance_rationale
             or "Assessment not available for this draft.",
+            # Human review fields (M4.1)
+            review_status=draft_run.review_status,
+            reviewer_edited_answer=draft_run.reviewer_edited_answer,
+            reviewer_compliance_status=draft_run.reviewer_compliance_status,
+            reviewer_compliance_rationale=draft_run.reviewer_compliance_rationale,
+            reviewer_comment=draft_run.reviewer_comment,
+            reviewed_at=draft_run.reviewed_at,
         )
     else:
         draft_response = RequirementDraftResponse(
@@ -484,4 +509,190 @@ async def get_drafting_status_controller(
         evidence_runs_failed=evidence_runs_failed,
         draft_runs_failed=draft_runs_failed,
         overall_status=overall_status,
+    )
+
+
+# --- Human Review (M4.1) ---
+
+def _citation_reviews_from_stored(citation_reviews: list) -> List[CitationReviewResponse]:
+    """Build citation review responses from persisted citation_reviews (M4.1).
+
+    Older drafts without citation_reviews yield an empty list.
+    """
+    results: List[CitationReviewResponse] = []
+    for cr in citation_reviews or []:
+        if not isinstance(cr, dict):
+            continue
+        results.append(
+            CitationReviewResponse(
+                evidence_id=cr.get("evidence_id", ""),
+                decision=cr.get("decision", "accept"),
+                reviewer_excerpt=cr.get("reviewer_excerpt"),
+                reason=cr.get("reason"),
+            )
+        )
+    return results
+
+
+async def review_draft_controller(
+    doc_id: str,
+    requirement_key: str,
+    request: ReviewDraftRequest,
+    workspace_id: Optional[str] = None,
+) -> ReviewDraftResponse:
+    """Submit a human review for a requirement draft.
+
+    The reviewer can:
+    - Provide an edited answer (replaces AI-generated draft)
+    - Override the compliance status and rationale
+    - Record per-citation review decisions (accept/reject/modify)
+    - Approve the draft or request changes
+    - Provide a concise comment/reason
+
+    All original AI-generated content (draft_answer, citations, compliance_status,
+    citation_verifications) is preserved. Review decisions are stored separately.
+    """
+    ws_uuid = _resolve_workspace_id(workspace_id)
+
+    # Get the requirement
+    req_repo = PostgresRequirementRepository()
+    try:
+        requirement = await req_repo.get_requirement(ws_uuid, doc_id, requirement_key)
+    except Exception as exc:
+        logger.exception("Failed to get requirement %s for %s", requirement_key, doc_id)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get requirement: {exc}"
+        ) from exc
+
+    if requirement is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Requirement '{requirement_key}' not found for document '{doc_id}'",
+        )
+
+    requirement_id = await req_repo.get_requirement_id(ws_uuid, doc_id, requirement_key)
+    if requirement_id is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Requirement '{requirement_key}' not found in database",
+        )
+
+    drafting_repo = PostgresDraftingRepository()
+
+    # Get the latest draft run
+    draft_run = await drafting_repo.get_latest_draft_run(
+        workspace_id=ws_uuid,
+        requirement_id=requirement_id,
+    )
+
+    if draft_run is None or draft_run.draft_answer is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No completed draft found for requirement '{requirement_key}'",
+        )
+
+    # Map review decision to review_status
+    review_status = "approved" if request.decision == "approve" else "changes_requested"
+
+    # Submit review
+    try:
+        updated_run = await drafting_repo.submit_review(
+            workspace_id=ws_uuid,
+            run_id=draft_run.run_id,
+            review_status=review_status,
+            reviewer_edited_answer=request.edited_answer,
+            reviewer_compliance_status=request.compliance_status,
+            reviewer_compliance_rationale=request.compliance_rationale,
+            reviewer_comment=request.comment,
+            citation_reviews=[
+                cr.model_dump() for cr in request.citation_reviews
+            ],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to submit review for %s", requirement_key)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to submit review: {exc}"
+        ) from exc
+
+    return ReviewDraftResponse(
+        requirement_id=updated_run.requirement_id,
+        requirement_key=requirement_key,
+        review_status=updated_run.review_status,
+        reviewer_edited_answer=updated_run.reviewer_edited_answer,
+        reviewer_compliance_status=updated_run.reviewer_compliance_status,
+        reviewer_compliance_rationale=updated_run.reviewer_compliance_rationale,
+        reviewer_comment=updated_run.reviewer_comment,
+        citation_reviews=_citation_reviews_from_stored(updated_run.citation_reviews),
+        reviewed_at=updated_run.reviewed_at,
+    )
+
+
+# --- Human Review Audit History (M4.2) ---
+
+async def get_review_history_controller(
+    doc_id: str,
+    requirement_key: str,
+    workspace_id: Optional[str] = None,
+) -> ReviewHistoryResponse:
+    """Retrieve the complete append-only review audit history for a requirement.
+
+    Returns events ordered chronologically (oldest first).
+    """
+    ws_uuid = _resolve_workspace_id(workspace_id)
+
+    # Get the requirement
+    req_repo = PostgresRequirementRepository()
+    try:
+        requirement = await req_repo.get_requirement(ws_uuid, doc_id, requirement_key)
+    except Exception as exc:
+        logger.exception("Failed to get requirement %s for %s", requirement_key, doc_id)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get requirement: {exc}"
+        ) from exc
+
+    if requirement is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Requirement '{requirement_key}' not found for document '{doc_id}'",
+        )
+
+    requirement_id = await req_repo.get_requirement_id(ws_uuid, doc_id, requirement_key)
+    if requirement_id is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Requirement '{requirement_key}' not found in database",
+        )
+
+    drafting_repo = PostgresDraftingRepository()
+
+    # Get review history
+    audit_events = await drafting_repo.get_review_history(ws_uuid, requirement_id)
+
+    # Convert to response schema
+    events = [
+        ReviewAuditEventResponse(
+            id=event.id,
+            workspace_id=event.workspace_id,
+            requirement_id=event.requirement_id,
+            draft_run_id=event.draft_run_id,
+            previous_review_status=event.previous_review_status,
+            review_status=event.review_status,
+            decision=event.decision,
+            reviewer_edited_answer=event.reviewer_edited_answer,
+            reviewer_compliance_status=event.reviewer_compliance_status,
+            reviewer_compliance_rationale=event.reviewer_compliance_rationale,
+            reviewer_comment=event.reviewer_comment,
+            citation_reviews=_citation_reviews_from_stored(event.citation_reviews),
+            reviewed_at=event.reviewed_at,
+            reviewer_workspace_id=event.reviewer_workspace_id,
+        )
+        for event in audit_events
+    ]
+
+    return ReviewHistoryResponse(
+        requirement_id=requirement_id,
+        requirement_key=requirement_key,
+        events=events,
     )

@@ -50,6 +50,7 @@ def event_loop():
 async def db_engine():
     """Initialize the test database and run migrations via alembic."""
     os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+    os.environ["DATABASE_USE_NULL_POOL"] = "true"
     initialize_database()
 
     # Apply migrations head using the project's alembic config.

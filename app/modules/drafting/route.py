@@ -5,12 +5,17 @@ from fastapi import APIRouter
 from app.modules.drafting.controller import (
     get_draft_controller,
     get_drafting_status_controller,
+    get_review_history_controller,
     list_drafts_controller,
+    review_draft_controller,
     start_drafting_controller,
 )
 from app.modules.drafting.schema import (
     DraftListResponse,
     DraftingStatusResponse,
+    ReviewDraftRequest,
+    ReviewDraftResponse,
+    ReviewHistoryResponse,
     SingleDraftResponse,
     StartDraftingRequest,
     StartDraftingResponse,
@@ -48,3 +53,32 @@ async def get_draft_route(
 ) -> SingleDraftResponse:
     """Retrieve a single requirement's draft with full evidence and run details."""
     return await get_draft_controller(doc_id, requirement_key)
+
+
+@router.post("/{doc_id}/requirements/{requirement_key}/review", response_model=ReviewDraftResponse)
+async def review_draft_route(
+    doc_id: str, requirement_key: str, request: ReviewDraftRequest
+) -> ReviewDraftResponse:
+    """Submit a human review for a requirement draft.
+
+    The reviewer can:
+    - Provide an edited answer (replaces AI-generated draft)
+    - Override the compliance status and rationale
+    - Record per-citation review decisions (accept/reject/modify)
+    - Approve the draft or request changes
+    - Provide a concise comment/reason
+
+    All original AI-generated content is preserved. Review decisions are stored separately.
+    """
+    return await review_draft_controller(doc_id, requirement_key, request)
+
+
+@router.get("/{doc_id}/requirements/{requirement_key}/history", response_model=ReviewHistoryResponse)
+async def get_review_history_route(
+    doc_id: str, requirement_key: str
+) -> ReviewHistoryResponse:
+    """Retrieve the complete append-only review audit history for a requirement.
+
+    Returns events ordered chronologically (oldest first).
+    """
+    return await get_review_history_controller(doc_id, requirement_key)

@@ -14,5 +14,10 @@ asyncpg>=0.29.0
 alembic>=1.13.0
 pgvector>=0.2.0
 pytest-asyncio>=0.23.0
+pymupdf>=1.24.0
+tiktoken>=0.7.0
+
+# Local Retrieval Stack component
+-e ./components/Retrieval-Stack
 
 # pip install -r requirements.txt

@@ -485,3 +485,296 @@ class TestCompliancePersistenceIntegration:
         # Workspace isolation: another workspace cannot read this run.
         other = await repo.get_latest_draft_run(WS_B, requirement_id)
         assert other is None
+
+
+class TestHumanReviewPersistenceIntegration:
+    """Human review workflow persists via the existing repository pattern (M4.1)."""
+
+    async def _make_requirement_with_draft(self) -> tuple[uuid.UUID, uuid.UUID]:
+        """Create a requirement and a completed draft run, return (requirement_id, draft_run_id)."""
+        factory = get_async_session_factory()
+        async with factory() as session:
+            run = ExtractionRun(
+                workspace_id=WS_A,
+                doc_id="doc1",
+                status="completed",
+                requirement_count=1,
+                errors=[],
+            )
+            session.add(run)
+            await session.flush()
+            req = Requirement(
+                workspace_id=WS_A,
+                run_id=run.id,
+                requirement_key="doc1:p1:1-10",
+                doc_id="doc1",
+                text="The system must support SAML 2.0 single sign-on.",
+                page_number=1,
+                character_start=1,
+                character_end=10,
+                modality="mandatory",
+                category="security",
+                confidence=0.9,
+                extraction_method="rule",
+            )
+            session.add(req)
+            await session.commit()
+            requirement_id = req.id
+
+        repo = PostgresDraftingRepository()
+        draft_run = await repo.create_draft_run(WS_A, requirement_id, None)
+        draft = RequirementDraft(
+            requirement_id=requirement_id,
+            requirement_key="doc1:p1:1-10",
+            requirement_text="The system must support SAML 2.0 single sign-on.",
+            draft_answer="We support SAML 2.0 single sign-on.",
+            citations=[EvidenceCitation("chunk_1", "SAML 2.0 single sign-on", 0.9)],
+            evidence_found=True,
+            uncertainty=UncertaintyLevel.SUPPORTED,
+            uncertainty_notes=[],
+            evidence_passages=[],
+            citation_verifications=[
+                CitationVerificationResult(
+                    evidence_id="chunk_1",
+                    excerpt="SAML 2.0 single sign-on",
+                    verified=True,
+                    reason=REASON_VERIFIED,
+                    source_doc_id="comp_doc",
+                    workspace_id=str(WS_A),
+                )
+            ],
+            compliance_status=ComplianceStatus.COMPLIANT,
+            compliance_rationale="Verified evidence meets the requirement.",
+        )
+        await repo.complete_draft_run(draft_run.run_id, draft)
+        return requirement_id, draft_run.run_id
+
+    async def test_review_approve_persists_and_readable(
+        self, db_engine, clean_tables
+    ):
+        """Submitting an approve review persists all review fields."""
+        requirement_id, draft_run_id = await self._make_requirement_with_draft()
+        repo = PostgresDraftingRepository()
+
+        # Submit review: approve with edits
+        updated = await repo.submit_review(
+            workspace_id=WS_A,
+            run_id=draft_run_id,
+            review_status="approved",
+            reviewer_edited_answer="Human: We support SAML 2.0 and OAuth 2.0.",
+            reviewer_compliance_status="compliant",
+            reviewer_compliance_rationale="Human verified with additional evidence.",
+            reviewer_comment="Approved with minor edit to include OAuth.",
+            citation_reviews=[
+                {"evidence_id": "chunk_1", "decision": "accept", "reason": "Verified"}
+            ],
+        )
+
+        assert updated.review_status == "approved"
+        assert updated.reviewer_edited_answer == "Human: We support SAML 2.0 and OAuth 2.0."
+        assert updated.reviewer_compliance_status == "compliant"
+        assert updated.reviewer_compliance_rationale == "Human verified with additional evidence."
+        assert updated.reviewer_comment == "Approved with minor edit to include OAuth."
+        assert len(updated.citation_reviews) == 1
+        assert updated.citation_reviews[0]["decision"] == "accept"
+        assert updated.reviewed_at is not None
+        assert updated.reviewer_workspace_id == WS_A
+        # AI originals preserved
+        assert updated.draft_answer == "We support SAML 2.0 single sign-on."
+        assert updated.compliance_status == "compliant"
+        assert updated.compliance_rationale == "Verified evidence meets the requirement."
+
+        # Re-fetch to verify persistence
+        fetched = await repo.get_draft_run(draft_run_id)
+        assert fetched is not None
+        assert fetched.review_status == "approved"
+        assert fetched.reviewer_edited_answer == "Human: We support SAML 2.0 and OAuth 2.0."
+        assert fetched.citation_reviews[0]["decision"] == "accept"
+
+    async def test_review_request_changes_persists(
+        self, db_engine, clean_tables
+    ):
+        """Submitting a request_changes review persists all review fields."""
+        requirement_id, draft_run_id = await self._make_requirement_with_draft()
+        repo = PostgresDraftingRepository()
+
+        updated = await repo.submit_review(
+            workspace_id=WS_A,
+            run_id=draft_run_id,
+            review_status="changes_requested",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Need to address gap in section 3.2.",
+            citation_reviews=[
+                {"evidence_id": "chunk_1", "decision": "reject", "reason": "Outdated evidence"}
+            ],
+        )
+
+        assert updated.review_status == "changes_requested"
+        assert updated.reviewer_edited_answer is None
+        assert updated.reviewer_comment == "Need to address gap in section 3.2."
+        assert updated.citation_reviews[0]["decision"] == "reject"
+
+    async def test_review_lifecycle_transitions_enforced(
+        self, db_engine, clean_tables
+    ):
+        """Valid transitions: None -> approved/changes_requested; changes_requested -> approved/changes_requested; approved is terminal."""
+        requirement_id, draft_run_id = await self._make_requirement_with_draft()
+        repo = PostgresDraftingRepository()
+
+        # First review: request changes
+        await repo.submit_review(
+            workspace_id=WS_A,
+            run_id=draft_run_id,
+            review_status="changes_requested",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="First review: needs more detail.",
+            citation_reviews=[],
+        )
+
+        # Second review: approve (valid transition from changes_requested)
+        updated = await repo.submit_review(
+            workspace_id=WS_A,
+            run_id=draft_run_id,
+            review_status="approved",
+            reviewer_edited_answer="Final answer",
+            reviewer_compliance_status="compliant",
+            reviewer_compliance_rationale="Now complete",
+            reviewer_comment="Approved on second review",
+            citation_reviews=[],
+        )
+        assert updated.review_status == "approved"
+
+        # Third review: try to change from approved -> should fail
+        with pytest.raises(ValueError, match="Invalid review transition"):
+            await repo.submit_review(
+                workspace_id=WS_A,
+                run_id=draft_run_id,
+                review_status="changes_requested",
+                reviewer_edited_answer=None,
+                reviewer_compliance_status=None,
+                reviewer_compliance_rationale=None,
+                reviewer_comment="Trying to reopen",
+                citation_reviews=[],
+            )
+
+    async def test_workspace_isolation_on_review(
+        self, db_engine, clean_tables
+    ):
+        """Review enforces workspace isolation."""
+        requirement_id, draft_run_id = await self._make_requirement_with_draft()
+        repo = PostgresDraftingRepository()
+
+        # Try to review from different workspace -> should fail
+        with pytest.raises(ValueError, match="does not belong to workspace"):
+            await repo.submit_review(
+                workspace_id=WS_B,
+                run_id=draft_run_id,
+                review_status="approved",
+                reviewer_edited_answer=None,
+                reviewer_compliance_status=None,
+                reviewer_compliance_rationale=None,
+                reviewer_comment="Cross-workspace attempt",
+                citation_reviews=[],
+            )
+
+    async def test_get_draft_run_for_review_workspace_isolation(
+        self, db_engine, clean_tables
+    ):
+        """get_draft_run_for_review enforces workspace isolation."""
+        requirement_id, draft_run_id = await self._make_requirement_with_draft()
+        repo = PostgresDraftingRepository()
+
+        # Same workspace -> returns record
+        found = await repo.get_draft_run_for_review(WS_A, draft_run_id)
+        assert found is not None
+        assert found.run_id == draft_run_id
+
+        # Different workspace -> returns None
+        not_found = await repo.get_draft_run_for_review(WS_B, draft_run_id)
+        assert not_found is None
+
+    async def test_review_preserves_ai_originals(
+        self, db_engine, clean_tables
+    ):
+        """Review stores human edits separately; AI originals unchanged."""
+        requirement_id, draft_run_id = await self._make_requirement_with_draft()
+        repo = PostgresDraftingRepository()
+
+        original_answer = "We support SAML 2.0 single sign-on."
+        original_compliance = "compliant"
+        original_rationale = "Verified evidence meets the requirement."
+
+        updated = await repo.submit_review(
+            workspace_id=WS_A,
+            run_id=draft_run_id,
+            review_status="approved",
+            reviewer_edited_answer="Human: We support SAML 2.0 and OAuth.",
+            reviewer_compliance_status="compliant",
+            reviewer_compliance_rationale="Human verified with additional evidence.",
+            reviewer_comment="Updated to include OAuth.",
+            citation_reviews=[
+                {"evidence_id": "chunk_1", "decision": "accept", "reason": "Verified"}
+            ],
+        )
+
+        # AI originals preserved
+        assert updated.draft_answer == original_answer
+        assert updated.compliance_status == original_compliance
+        assert updated.compliance_rationale == original_rationale
+        # Human edits stored separately
+        assert updated.reviewer_edited_answer == "Human: We support SAML 2.0 and OAuth."
+        assert updated.reviewer_compliance_status == "compliant"
+        assert updated.reviewer_compliance_rationale == "Human verified with additional evidence."
+
+    async def test_citation_reviews_distinct_from_verification(
+        self, db_engine, clean_tables
+    ):
+        """Citation reviews are stored separately from automated verification results."""
+        requirement_id, draft_run_id = await self._make_requirement_with_draft()
+        repo = PostgresDraftingRepository()
+
+        # Submit review with citation decisions (distinct from verification)
+        updated = await repo.submit_review(
+            workspace_id=WS_A,
+            run_id=draft_run_id,
+            review_status="approved",
+            reviewer_edited_answer=None,
+            reviewer_compliance_status=None,
+            reviewer_compliance_rationale=None,
+            reviewer_comment="Citation review done",
+            citation_reviews=[
+                {"evidence_id": "chunk_1", "decision": "accept", "reason": "Confirmed"},
+                {"evidence_id": "chunk_2", "decision": "modify", "reviewer_excerpt": "Corrected excerpt", "reason": "Fixed quote"},
+            ],
+        )
+
+        # Verification results (M3.3) are in citations via _citations_with_verification
+        assert updated.citations[0]["verified"] is True
+        # Human citation reviews are separate
+        assert len(updated.citation_reviews) == 2
+        assert updated.citation_reviews[0]["decision"] == "accept"
+        assert updated.citation_reviews[1]["decision"] == "modify"
+        assert updated.citation_reviews[1]["reviewer_excerpt"] == "Corrected excerpt"
+
+    async def test_legacy_drafts_without_review_fields_readable(
+        self, db_engine, clean_tables
+    ):
+        """Older draft records without review data remain readable with sensible defaults."""
+        requirement_id, draft_run_id = await self._make_requirement_with_draft()
+        repo = PostgresDraftingRepository()
+
+        # Fetch the existing draft (no review submitted yet)
+        fetched = await repo.get_draft_run(draft_run_id)
+        assert fetched is not None
+        assert fetched.review_status is None
+        assert fetched.reviewer_edited_answer is None
+        assert fetched.reviewer_compliance_status is None
+        assert fetched.reviewer_compliance_rationale is None
+        assert fetched.reviewer_comment is None
+        assert fetched.citation_reviews == []
+        assert fetched.reviewed_at is None
+        assert fetched.reviewer_workspace_id is None
