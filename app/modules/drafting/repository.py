@@ -149,6 +149,16 @@ class DraftingRepository(ABC):
         ...
 
     @abstractmethod
+    async def update_edited_answer(
+        self,
+        workspace_id: uuid.UUID,
+        run_id: uuid.UUID,
+        edited_answer: str,
+    ) -> "DraftGenerationRunRecord":
+        """Persist a manually edited answer without creating a review or audit event."""
+        ...
+
+    @abstractmethod
     async def get_draft_run_for_review(
         self, workspace_id: uuid.UUID, run_id: uuid.UUID
     ) -> Optional["DraftGenerationRunRecord"]:
@@ -667,6 +677,24 @@ class PostgresDraftingRepository(DraftingRepository):
 
             return _draft_run_to_record(run)
 
+    async def update_edited_answer(
+        self,
+        workspace_id: uuid.UUID,
+        run_id: uuid.UUID,
+        edited_answer: str,
+    ) -> DraftGenerationRunRecord:
+        async with self._session_factory() as session:
+            run = await session.get(DraftGenerationRun, run_id)
+            if run is None:
+                raise ValueError(f"Draft run {run_id} not found")
+            if run.workspace_id != workspace_id:
+                raise ValueError(f"Draft run {run_id} does not belong to workspace {workspace_id}")
+            run.reviewer_edited_answer = edited_answer
+            run.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            await session.refresh(run)
+            return _draft_run_to_record(run)
+
     async def get_draft_run_for_review(
         self, workspace_id: uuid.UUID, run_id: uuid.UUID
     ) -> Optional[DraftGenerationRunRecord]:
@@ -1039,6 +1067,21 @@ class InMemoryDraftingRepository(DraftingRepository):
         # Sort by reviewed_at ascending, then id for stable ordering
         events.sort(key=lambda e: (e.reviewed_at, e.id))
         return events
+
+    async def update_edited_answer(
+        self,
+        workspace_id: uuid.UUID,
+        run_id: uuid.UUID,
+        edited_answer: str,
+    ) -> DraftGenerationRunRecord:
+        record = self._draft_runs.get(run_id)
+        if record is None:
+            raise ValueError(f"Draft run {run_id} not found")
+        if record.workspace_id != workspace_id:
+            raise ValueError(f"Draft run {run_id} does not belong to workspace {workspace_id}")
+        record.reviewer_edited_answer = edited_answer
+        record.updated_at = datetime.now(timezone.utc)
+        return record
 
     async def get_draft_run_for_review(
         self, workspace_id: uuid.UUID, run_id: uuid.UUID

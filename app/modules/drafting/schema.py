@@ -300,6 +300,21 @@ class ReviewAuditEventResponse(BaseModel):
     reviewer_workspace_id: UUID = Field(..., description="Reviewer's workspace (audit)")
 
 
+class EditAnswerRequest(BaseModel):
+    """Request to manually edit an AI-generated answer."""
+
+    edited_answer: str = Field(..., min_length=1, description="User's edited answer")
+
+
+class EditAnswerResponse(BaseModel):
+    """Response after saving a manually edited answer."""
+
+    requirement_id: UUID = Field(..., description="Database UUID of the requirement")
+    requirement_key: str = Field(..., description="Stable requirement identifier")
+    edited_answer: Optional[str] = Field(None, description="Saved edited answer")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
 class ReviewHistoryResponse(BaseModel):
     """Complete review audit history for a requirement (M4.2).
 

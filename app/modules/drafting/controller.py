@@ -17,6 +17,8 @@ from app.modules.drafting.schema import (
     CitationReviewResponse,
     CitationVerificationResponse,
     DraftListResponse,
+    EditAnswerRequest,
+    EditAnswerResponse,
     DraftingStatusResponse,
     EvidenceCitationResponse,
     EvidencePassageResponse,
@@ -691,8 +693,48 @@ async def get_review_history_controller(
         for event in audit_events
     ]
 
-    return ReviewHistoryResponse(
-        requirement_id=requirement_id,
+async def edit_answer_controller(
+    doc_id: str,
+    requirement_key: str,
+    request: EditAnswerRequest,
+    workspace_id: Optional[str] = None,
+) -> EditAnswerResponse:
+    ws_uuid = _resolve_workspace_id(workspace_id)
+
+    req_repo = PostgresRequirementRepository()
+    try:
+        requirement = await req_repo.get_requirement(ws_uuid, doc_id, requirement_key)
+    except Exception as exc:
+        logger.exception("Failed to get requirement %s for %s", requirement_key, doc_id)
+        raise HTTPException(status_code=500, detail=f"Failed to get requirement: {exc}") from exc
+
+    if requirement is None:
+        raise HTTPException(status_code=404, detail=f"Requirement '{requirement_key}' not found for document '{doc_id}'")
+
+    requirement_id = await req_repo.get_requirement_id(ws_uuid, doc_id, requirement_key)
+    if requirement_id is None:
+        raise HTTPException(status_code=404, detail=f"Requirement '{requirement_key}' not found in database")
+
+    drafting_repo = PostgresDraftingRepository()
+    draft_run = await drafting_repo.get_latest_draft_run(workspace_id=ws_uuid, requirement_id=requirement_id)
+    if draft_run is None or draft_run.draft_answer is None:
+        raise HTTPException(status_code=404, detail=f"No completed draft found for requirement '{requirement_key}'")
+
+    try:
+        updated_run = await drafting_repo.update_edited_answer(
+            workspace_id=ws_uuid,
+            run_id=draft_run.run_id,
+            edited_answer=request.edited_answer,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to edit answer for %s", requirement_key)
+        raise HTTPException(status_code=500, detail=f"Failed to edit answer: {exc}") from exc
+
+    return EditAnswerResponse(
+        requirement_id=updated_run.requirement_id,
         requirement_key=requirement_key,
-        events=events,
+        edited_answer=updated_run.reviewer_edited_answer,
+        updated_at=updated_run.updated_at,
     )
