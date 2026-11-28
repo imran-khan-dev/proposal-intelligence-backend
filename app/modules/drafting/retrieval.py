@@ -14,7 +14,7 @@ from typing import List, Optional
 from app.ai.embeddings import EmbeddingProvider
 from app.ai.embedding_factory import get_embedding_provider
 from app.core.workspace import resolve_workspace_id
-from app.rag.retrieve import retrieve
+from app.rag.retrieve import retrieve, async_retrieve
 from app.rag.store import SearchResult, VectorStore
 from app.rag.store_factory import get_vector_store
 from app.rag.stores.postgres_vector_store import PostgreSQLVectorStore
@@ -201,23 +201,54 @@ async def retrieve_evidence_for_requirement_async(
 ) -> List[EvidencePassage]:
     """Async version of retrieve_evidence_for_requirement.
 
-    Uses async search when available (PostgreSQLVectorStore) to avoid blocking.
+    Uses async hybrid search when available (PostgreSQLVectorStore) to avoid blocking.
     """
     if embedder is None:
         embedder = get_embedding_provider()
     if store is None:
         store = _scoped_vector_store(workspace_id)
 
-    # The retrieve function is sync; for async stores we can still call it
-    # since it uses the store's search method which has async variant
-    # For now, use the sync version as the embedding is the main cost
-    return retrieve_evidence_for_requirement(
+    if not requirement_text or not requirement_text.strip():
+        logger.warning("Empty requirement text provided for retrieval")
+        return []
+
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+
+    # Build focused query
+    query = _build_retrieval_query(
         requirement_text=requirement_text,
-        workspace_id=workspace_id,
-        embedder=embedder,
-        store=store,
         section_title=section_title,
         section_path=section_path,
         category=category,
-        top_k=top_k,
     )
+
+    try:
+        # Retrieve using the async hybrid retrieval pipeline.
+        # The source-type filter guarantees only company knowledge is searched.
+        results = await async_retrieve(
+            query=query,
+            embedder=embedder,
+            store=store,
+            top_k=top_k,
+            source_type=COMPANY_KNOWLEDGE_SOURCE_TYPE,
+            use_hybrid=True,
+        )
+
+        # Convert to evidence passages with preserved source references
+        passages = [
+            _search_result_to_passage(result, rank=i + 1)
+            for i, result in enumerate(results)
+        ]
+
+        logger.info(
+            "Retrieved %d evidence passages for requirement (workspace=%s)",
+            len(passages),
+            workspace_id,
+        )
+        return passages
+
+    except Exception as exc:
+        logger.exception("Evidence retrieval failed for requirement: %s", exc)
+        # Return empty list on error - caller can decide how to handle
+        return []

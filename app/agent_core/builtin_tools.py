@@ -4,6 +4,7 @@ from typing import Any
 import asyncio
 
 from app.ai.embeddings import EmbeddingProvider
+from app.rag.retrieve import async_retrieve
 from app.rag.store import VectorStore
 
 
@@ -111,25 +112,16 @@ def create_search_company_knowledge_tool(
         if not query or not query.strip():
             return []
 
-        # Run embedding in thread pool to avoid blocking event loop
-        query_embeddings = await asyncio.to_thread(embedder.embed, [query])
-        if not query_embeddings:
-            return []
-        query_embedding = query_embeddings[0]
-
-        # Use async search if available (for PostgreSQLVectorStore)
-        if hasattr(store, 'async_search'):
-            results = await store.async_search(
-                query_embedding=query_embedding,
-                k=top_k,
-                source_type="company_knowledge",
-            )
-        else:
-            # Fallback to sync search for InMemoryVectorStore, PersistentVectorStore
-            results = await asyncio.to_thread(
-                store.search, query_embedding, top_k,
-                source_type="company_knowledge",
-            )
+        # Use async hybrid retrieval when available (PostgreSQLVectorStore),
+        # falls back to dense-only search for other stores.
+        results = await async_retrieve(
+            query=query,
+            embedder=embedder,
+            store=store,
+            top_k=top_k,
+            source_type="company_knowledge",
+            use_hybrid=True,
+        )
 
         # Convert SearchResult objects to JSON-serializable dicts
         return [
